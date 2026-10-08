@@ -44,3 +44,7 @@ The workflow suite covers stock and money rollback, duplicate checkout preventio
 ## Data boundaries
 
 Inventory and payment accounts are global across outlets in the existing schema. Outlet selection is recorded on transactions; this is not independent branch stock accounting. Internal warehouse transfers preserve global stock, company outbound transfers deduct it. Returns reference original documents and the API caps cumulative returned quantities and financial credits. Sales returns currently require a registered customer; walk-in return support needs an explicit account policy/schema extension. SMS and payment-terminal integrations are not connected and no success is claimed for them.
+
+### Staff administration follow-up
+
+`POST /api/v1/auth/register` accepts an optional existing `designation_id` and saves it with the staff account in one transaction. Deploy this API version before the corporate-workspace frontend, which sends the selected role during registration. Role permission updates accept an empty array to revoke all permissions. Role reassignment rejects removal of the last administrator; assign another administrator first. This follow-up requires no additional migrations beyond the initial POS upgrade. Regression coverage: 44 tests / 235 assertions.
