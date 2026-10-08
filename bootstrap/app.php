@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Http\Middleware\CheckPermission;
 use App\Http\Middleware\EnforceTlsAndSecurityHeaders;
 use App\Http\Middleware\GzipCompression;
 use App\Http\Middleware\JwtAuthenticate;
@@ -41,6 +42,7 @@ return Application::configure(basePath: dirname(__DIR__))
 
         // Route Middleware Aliases
         $middleware->alias([
+            'permission' => CheckPermission::class,
             'jwt.auth' => JwtAuthenticate::class,
             'jwt.optional' => JwtOptionalAuthenticate::class,
             'tls.security' => EnforceTlsAndSecurityHeaders::class,

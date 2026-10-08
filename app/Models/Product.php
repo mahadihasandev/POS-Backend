@@ -14,6 +14,8 @@ class Product extends Model
     use HasFactory;
 
     protected $fillable = [
+        'low_stock_threshold',
+        'is_active',
         'supplier_id',
         'name',
         'code',
@@ -27,6 +29,8 @@ class Product extends Model
     protected function casts(): array
     {
         return [
+            'is_active' => 'boolean',
+            'low_stock_threshold' => 'integer',
             'available_qty' => 'integer',
             'unit_price' => 'decimal:2',
             'cost_price' => 'decimal:2',

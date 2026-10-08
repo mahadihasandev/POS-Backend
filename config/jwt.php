@@ -11,7 +11,7 @@ return [
     | Used to cryptographically sign the JWT using HMAC algorithms (HS256).
     |
     */
-    'secret' => env('JWT_SECRET', env('APP_KEY')),
+    'secret' => env('JWT_SECRET') ?: env('APP_KEY'),
 
     /*
     |--------------------------------------------------------------------------
@@ -22,7 +22,7 @@ return [
     | cannot be viewed or inspected even if intercepted.
     |
     */
-    'encryption_key' => env('JWT_ENCRYPTION_KEY', env('APP_KEY')),
+    'encryption_key' => env('JWT_ENCRYPTION_KEY') ?: env('APP_KEY'),
 
     /*
     |--------------------------------------------------------------------------

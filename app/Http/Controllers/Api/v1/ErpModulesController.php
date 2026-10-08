@@ -13,7 +13,6 @@ use App\Models\GeneralExpense;
 use App\Models\Marketer;
 use App\Models\MarketerPayment;
 use App\Models\MarketerSlab;
-use App\Models\Outlet;
 use App\Models\Product;
 use App\Models\Purchase;
 use App\Models\PurchaseItem;
@@ -28,9 +27,11 @@ use App\Models\StockTransferItem;
 use App\Models\Supplier;
 use App\Models\SupplierPayment;
 use App\Models\Wastage;
+use App\Support\PosRules;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Response;
 
 class ErpModulesController extends BaseApiController
@@ -51,7 +52,7 @@ class ErpModulesController extends BaseApiController
         }
 
         if ($request->filled('chalan_no')) {
-            $query->where('chalan_no', 'like', '%' . $request->input('chalan_no') . '%');
+            $query->where('chalan_no', 'like', '%'.$request->input('chalan_no').'%');
         }
 
         if ($request->filled('start_date')) {
@@ -63,6 +64,7 @@ class ErpModulesController extends BaseApiController
         }
 
         $purchases = $query->paginate(15);
+
         return $this->successResponse($purchases);
     }
 
@@ -80,15 +82,16 @@ class ErpModulesController extends BaseApiController
             'discount' => 'numeric|min:0',
             'tax' => 'numeric|min:0',
             'paid_amount' => 'required|numeric|min:0',
-            'payment_account' => 'required|string',
+            'payment_account' => 'required|string|exists:financial_accounts,name',
             'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.product_id' => 'required|distinct|exists:products,id',
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.free_qty' => 'integer|min:0',
             'items.*.unit_cost' => 'required|numeric|min:0',
         ]);
 
         $purchase = DB::transaction(function () use ($validated) {
+            Supplier::lockForUpdate()->findOrFail($validated['supplier_id']);
             $subtotal = 0.0;
             $itemsData = [];
 
@@ -121,7 +124,10 @@ class ErpModulesController extends BaseApiController
 
             $discount = (float) ($validated['discount'] ?? 0);
             $tax = (float) ($validated['tax'] ?? 0);
-            $totalPayable = max(0.0, $subtotal - $discount + $tax);
+            if ($discount > $subtotal) {
+                throw ValidationException::withMessages(['discount' => 'Discount exceeds the purchase subtotal.']);
+            }
+            $totalPayable = round($subtotal - $discount + $tax, 2);
             $paid = (float) $validated['paid_amount'];
             $due = max(0.0, $totalPayable - $paid);
 
@@ -147,9 +153,9 @@ class ErpModulesController extends BaseApiController
 
             // Deduct payment from financial account if paid
             if ($paid > 0) {
-                $account = FinancialAccount::where('name', $validated['payment_account'])->first();
+                $account = FinancialAccount::where('name', $validated['payment_account'])->lockForUpdate()->firstOrFail();
                 if ($account) {
-                    $account->decrement('balance', min($paid, $totalPayable));
+                    PosRules::debit($account, min($paid, $totalPayable));
                 }
             }
 
@@ -157,6 +163,7 @@ class ErpModulesController extends BaseApiController
         });
 
         $purchase->load(['supplier', 'items']);
+
         return $this->successResponse($purchase, 'Purchase record and inventory updated successfully.', Response::HTTP_CREATED);
     }
 
@@ -169,19 +176,23 @@ class ErpModulesController extends BaseApiController
             'supplier_id' => 'required|exists:suppliers,id',
             'payment_date' => 'required|date',
             'payment_method' => 'required|string',
-            'account' => 'required|string',
+            'account' => 'required|string|exists:financial_accounts,name',
             'previous_due' => 'required|numeric|min:0',
             'discount' => 'numeric|min:0',
-            'paid_amount' => 'required|numeric|min:0.01',
+            'paid_amount' => 'required|numeric|min:0.01|decimal:0,2',
             'note' => 'nullable|string',
         ]);
 
         $payment = DB::transaction(function () use ($validated) {
-            $paymentNo = 'SPAY-' . date('Ymd') . '-' . str_pad((string) (SupplierPayment::count() + 1), 4, '0', STR_PAD_LEFT);
-            $prevDue = (float) $validated['previous_due'];
+            $paymentNo = PosRules::number('SPAY');
+            Supplier::lockForUpdate()->findOrFail($validated['supplier_id']);
+            $prevDue = PosRules::supplierDue((int) $validated['supplier_id']);
             $paid = (float) $validated['paid_amount'];
             $discount = (float) ($validated['discount'] ?? 0);
-            $remaining = max(0.0, $prevDue - ($paid + $discount));
+            if ($paid + $discount > $prevDue) {
+                throw ValidationException::withMessages(['paid_amount' => 'Payment plus discount exceeds the current supplier due.']);
+            }
+            $remaining = round($prevDue - ($paid + $discount), 2);
 
             $record = SupplierPayment::create([
                 'payment_no' => $paymentNo,
@@ -197,21 +208,23 @@ class ErpModulesController extends BaseApiController
             ]);
 
             // Deduct cash/bank balance
-            $account = FinancialAccount::where('name', $validated['account'])->first();
+            $account = FinancialAccount::where('name', $validated['account'])->lockForUpdate()->firstOrFail();
             if ($account) {
-                $account->decrement('balance', $paid);
+                PosRules::debit($account, $paid);
             }
 
             return $record;
         });
 
         $payment->load('supplier');
+
         return $this->successResponse($payment, 'Supplier payment completed successfully.', Response::HTTP_CREATED);
     }
 
     public function getSupplierPayments(): JsonResponse
     {
         $payments = SupplierPayment::with('supplier')->latest('id')->paginate(15);
+
         return $this->successResponse($payments);
     }
 
@@ -224,10 +237,11 @@ class ErpModulesController extends BaseApiController
         }
 
         if ($request->filled('return_no')) {
-            $query->where('return_no', 'like', '%' . $request->input('return_no') . '%');
+            $query->where('return_no', 'like', '%'.$request->input('return_no').'%');
         }
 
         $records = $query->paginate(15);
+
         return $this->successResponse($records);
     }
 
@@ -236,32 +250,49 @@ class ErpModulesController extends BaseApiController
         $validated = $request->validate([
             'supplier_id' => 'required|exists:suppliers,id',
             'outlet_id' => 'nullable|exists:outlets,id',
-            'chalan_no' => 'nullable|string',
+            'chalan_no' => 'required|string|exists:purchases,chalan_no',
             'return_date' => 'required|date',
             'cash_refund' => 'numeric|min:0',
             'due_deduction' => 'numeric|min:0',
-            'payment_account' => 'required|string',
+            'payment_account' => 'required|string|exists:financial_accounts,name',
             'note' => 'nullable|string',
             'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.product_id' => 'required|distinct|exists:products,id',
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.unit_cost' => 'required|numeric|min:0',
             'items.*.reason' => 'required|string',
         ]);
 
         $purchaseReturn = DB::transaction(function () use ($validated) {
-            $returnNo = 'PRET-' . date('Ymd') . '-' . str_pad((string) (PurchaseReturn::count() + 1), 4, '0', STR_PAD_LEFT);
+            Supplier::lockForUpdate()->findOrFail($validated['supplier_id']);
+            $returnNo = PosRules::number('PRET');
+            $original = Purchase::where('chalan_no', $validated['chalan_no'])->where('supplier_id', $validated['supplier_id'])->lockForUpdate()->first();
+            if (! $original) {
+                throw ValidationException::withMessages(['chalan_no' => 'Select a purchase from this supplier.']);
+            }
             $totalReturnAmount = 0.0;
             $itemsData = [];
 
             foreach ($validated['items'] as $item) {
                 $qty = (int) $item['quantity'];
-                $cost = (float) $item['unit_cost'];
-                $sub = round($qty * $cost, 2);
+                $originalItem = $original->items()->where('product_id', $item['product_id'])->first();
+                $alreadyReturned = PurchaseReturnItem::where('product_id', $item['product_id'])
+                    ->whereHas('purchaseReturn', fn ($q) => $q->where('chalan_no', $original->chalan_no))->sum('quantity');
+                if (! $originalItem || $qty + $alreadyReturned > $originalItem->quantity + $originalItem->free_qty) {
+                    throw ValidationException::withMessages(['items' => 'Return quantity exceeds the original purchase.']);
+                }
+                // Allocate the original net purchase cost across paid and free units.
+                $netFactor = (float) $original->subtotal > 0 ? (float) $original->total_payable / (float) $original->subtotal : 0;
+                $lineValue = round((float) $originalItem->subtotal * $netFactor, 2);
+                $previousValue = (float) PurchaseReturnItem::where('product_id', $item['product_id'])
+                    ->whereHas('purchaseReturn', fn ($q) => $q->where('chalan_no', $original->chalan_no))->sum('subtotal');
+                $sub = min(round($lineValue * $qty / ($originalItem->quantity + $originalItem->free_qty), 2), max(0, round($lineValue - $previousValue, 2)));
+                $cost = round($sub / $qty, 2);
                 $totalReturnAmount += $sub;
 
                 $product = Product::lockForUpdate()->find($item['product_id']);
                 // Deduct inventory
+                PosRules::requireStock($product, $qty);
                 $product->decrement('available_qty', $qty);
 
                 $itemsData[] = [
@@ -276,10 +307,16 @@ class ErpModulesController extends BaseApiController
             }
 
             $cashRefund = (float) ($validated['cash_refund'] ?? 0);
-            $dueDeduction = (float) ($validated['due_deduction'] ?? 0);
+            if ($cashRefund > $totalReturnAmount) {
+                throw ValidationException::withMessages(['cash_refund' => 'Refund exceeds the returned value.']);
+            }
+            $dueDeduction = round($totalReturnAmount - $cashRefund, 2);
+            if ($dueDeduction > PosRules::supplierDue((int) $validated['supplier_id'])) {
+                throw ValidationException::withMessages(['due_deduction' => 'Return credit exceeds supplier due. Enter the cash refund received.']);
+            }
 
             if ($cashRefund > 0) {
-                $acc = FinancialAccount::where('name', $validated['payment_account'])->first();
+                $acc = FinancialAccount::where('name', $validated['payment_account'])->lockForUpdate()->firstOrFail();
                 if ($acc) {
                     $acc->increment('balance', $cashRefund);
                 }
@@ -293,7 +330,7 @@ class ErpModulesController extends BaseApiController
                 'return_date' => $validated['return_date'],
                 'total_return_amount' => $totalReturnAmount,
                 'cash_refund' => $cashRefund,
-                'due_deduction' => $dueDeduction > 0 ? $dueDeduction : max(0.0, $totalReturnAmount - $cashRefund),
+                'due_deduction' => $dueDeduction,
                 'payment_account' => $validated['payment_account'],
                 'note' => $validated['note'] ?? null,
                 'status' => 'completed',
@@ -307,6 +344,7 @@ class ErpModulesController extends BaseApiController
         });
 
         $purchaseReturn->load(['supplier', 'items']);
+
         return $this->successResponse($purchaseReturn, 'Purchase return processed and inventory decremented.', Response::HTTP_CREATED);
     }
 
@@ -326,10 +364,11 @@ class ErpModulesController extends BaseApiController
         }
 
         if ($request->filled('return_no')) {
-            $query->where('return_no', 'like', '%' . $request->input('return_no') . '%');
+            $query->where('return_no', 'like', '%'.$request->input('return_no').'%');
         }
 
         $records = $query->paginate(15);
+
         return $this->successResponse($records);
     }
 
@@ -341,24 +380,31 @@ class ErpModulesController extends BaseApiController
         $validated = $request->validate([
             'customer_id' => 'required|exists:customers,id',
             'supplier_id' => 'nullable|exists:suppliers,id',
-            'invoice_id' => 'nullable|string',
+            'invoice_id' => 'required|string|exists:sales,invoice_id',
             'return_date' => 'required|date',
             'cash_refund' => 'numeric|min:0',
             'comments' => 'nullable|string',
-            'return_items' => 'array',
-            'return_items.*.product_id' => 'required|exists:products,id',
+            'payment_account' => 'required|string|exists:financial_accounts,name',
+            'return_items' => 'required|array|min:1',
+            'return_items.*.product_id' => 'required|distinct|exists:products,id',
             'return_items.*.quantity' => 'required|integer|min:1',
             'return_items.*.unit_price' => 'required|numeric|min:0',
             'return_items.*.condition' => 'required|string|in:good,damaged,scrap',
             'return_items.*.product_serial' => 'nullable|string',
             'exchange_items' => 'array',
-            'exchange_items.*.product_id' => 'required|exists:products,id',
+            'exchange_items.*.product_id' => 'required|distinct|exists:products,id',
             'exchange_items.*.quantity' => 'required|integer|min:1',
             'exchange_items.*.unit_price' => 'required|numeric|min:0',
         ]);
 
         $saleReturn = DB::transaction(function () use ($validated) {
-            $returnNo = 'RET-' . date('Ymd') . '-' . str_pad((string) (SaleReturn::count() + 1), 4, '0', STR_PAD_LEFT);
+            $returnNo = PosRules::number('RET');
+            $customer = Customer::lockForUpdate()->findOrFail($validated['customer_id']);
+            $original = Sale::where('invoice_id', $validated['invoice_id'])->where('customer_id', $customer->id)
+                ->where('status', 'completed')->lockForUpdate()->first();
+            if (! $original) {
+                throw ValidationException::withMessages(['invoice_id' => 'Select a completed invoice for this customer.']);
+            }
             $totalReturnValue = 0.0;
             $totalExchangeValue = 0.0;
 
@@ -366,7 +412,16 @@ class ErpModulesController extends BaseApiController
             $processedReturns = [];
             foreach ($validated['return_items'] ?? [] as $r) {
                 $qty = (int) $r['quantity'];
-                $price = (float) $r['unit_price'];
+                $originalItem = $original->items()->where('product_id', $r['product_id'])->first();
+                $returned = SaleReturnItem::where('product_id', $r['product_id'])->where('item_type', 'return')
+                    ->whereHas('saleReturn', fn ($q) => $q->where('invoice_id', $original->invoice_id))->sum('quantity');
+                if (! $originalItem || $qty + $returned > $originalItem->quantity) {
+                    throw ValidationException::withMessages(['return_items' => 'Return quantity exceeds the remaining sold quantity.']);
+                }
+                // Refund the actual discounted value, excluding delivery and prior debt.
+                $lineShare = $original->invoice_total > 0
+                    ? max(0, 1 - ((float) $original->discount + (float) $original->special_discount) / (float) $original->invoice_total) : 0;
+                $price = (float) $originalItem->subtotal / $originalItem->quantity * $lineShare;
                 $lineSub = round($qty * $price, 2);
                 $totalReturnValue += $lineSub;
 
@@ -384,7 +439,7 @@ class ErpModulesController extends BaseApiController
                         'total_loss' => round($qty * (float) $product->cost_price, 2),
                         'reason' => $r['condition'],
                         'wastage_date' => $validated['return_date'],
-                        'note' => "Returned damaged item from customer",
+                        'note' => 'Returned damaged item from customer',
                     ]);
                 }
 
@@ -409,6 +464,7 @@ class ErpModulesController extends BaseApiController
                 $totalExchangeValue += $lineSub;
 
                 $product = Product::lockForUpdate()->find($e['product_id']);
+                PosRules::requireStock($product, $qty);
                 $product->decrement('available_qty', $qty);
 
                 $processedExchanges[] = [
@@ -423,16 +479,24 @@ class ErpModulesController extends BaseApiController
                 ];
             }
 
-            $customer = Customer::lockForUpdate()->find($validated['customer_id']);
+            // Customer was locked before the original invoice.
             $prevDue = (float) $customer->previous_due;
             $netAdjustment = round($totalReturnValue - $totalExchangeValue, 2);
-            $cashRefund = (float) ($validated['cash_refund'] ?? 0);
+            $cashRefund = round((float) ($validated['cash_refund'] ?? 0), 2);
+            if ($cashRefund > max(0, $netAdjustment)) {
+                throw ValidationException::withMessages(['cash_refund' => 'Cash refund exceeds the net return credit.']);
+            }
+            $account = FinancialAccount::where('name', $validated['payment_account'])->lockForUpdate()->firstOrFail();
+            if ($cashRefund > 0) {
+                PosRules::debit($account, $cashRefund);
+            }
 
             // New due calculation
             // If return > exchange, credit customer (decrease due or refund cash)
             // If exchange > return, debit customer (increase due)
-            $newDue = max(0.0, $prevDue - ($netAdjustment - $cashRefund));
-            $customer->update(['previous_due' => $newDue]);
+            $netBalance = round($prevDue - $netAdjustment + $cashRefund - (float) $customer->advanced_amount, 2);
+            $newDue = max(0, $netBalance);
+            $customer->update(['previous_due' => $newDue, 'advanced_amount' => max(0, -$netBalance)]);
 
             $record = SaleReturn::create([
                 'return_no' => $returnNo,
@@ -457,6 +521,7 @@ class ErpModulesController extends BaseApiController
         });
 
         $saleReturn->load(['customer', 'items']);
+
         return $this->successResponse($saleReturn, 'Sale return and exchange processed successfully.', Response::HTTP_CREATED);
     }
 
@@ -467,9 +532,10 @@ class ErpModulesController extends BaseApiController
     public function getMarketers(): JsonResponse
     {
         $marketers = Marketer::with(['sales'])->get()->map(function ($m) {
-            $totalSales = $m->sales->where('status', 'completed')->sum('payable_amount');
+            $totalSales = $m->sales->where('status', 'completed')->sum(fn ($sale) => (float) $sale->invoice_total - (float) $sale->discount - (float) $sale->special_discount);
             $slabs = MarketerSlab::where('marketer_id', $m->id)->get();
-            $commissionEarned = round($totalSales * 0.05, 2); // default 5% or tiered
+            $slab = $slabs->first(fn ($slab) => $totalSales >= $slab->start_amount && $totalSales <= $slab->end_amount);
+            $commissionEarned = round($totalSales * (float) ($slab?->percentage ?? 0) / 100, 2);
             $amountPaid = MarketerPayment::where('marketer_id', $m->id)->sum('amount');
             $balance = max(0.0, $commissionEarned - $amountPaid);
 
@@ -494,11 +560,17 @@ class ErpModulesController extends BaseApiController
             'name' => 'required|string|max:255',
             'phone' => 'nullable|string',
             'slabs' => 'array',
-            'slabs.*.start_amount' => 'numeric|min:0',
-            'slabs.*.end_amount' => 'numeric|min:0',
-            'slabs.*.percentage' => 'numeric|min:0|max:100',
+            'slabs.*.start_amount' => 'required|numeric|min:0',
+            'slabs.*.end_amount' => 'required|numeric|min:0|gte:slabs.*.start_amount',
+            'slabs.*.percentage' => 'required|numeric|min:0|max:100',
         ]);
 
+        $slabs = collect($validated['slabs'] ?? [])->sortBy('start_amount')->values();
+        for ($i = 1; $i < $slabs->count(); $i++) {
+            if ($slabs[$i]['start_amount'] <= $slabs[$i - 1]['end_amount']) {
+                throw ValidationException::withMessages(['slabs' => 'Commission slabs cannot overlap.']);
+            }
+        }
         $marketer = DB::transaction(function () use ($validated) {
             $m = Marketer::create([
                 'name' => $validated['name'],
@@ -526,11 +598,24 @@ class ErpModulesController extends BaseApiController
             'marketer_id' => 'required|exists:marketers,id',
             'payment_date' => 'required|date',
             'amount' => 'required|numeric|min:1',
-            'payment_method' => 'required|string',
+            'payment_method' => 'required|string|exists:financial_accounts,name',
             'note' => 'nullable|string',
         ]);
 
-        $payment = MarketerPayment::create($validated);
+        $payment = DB::transaction(function () use ($validated) {
+            $marketer = Marketer::lockForUpdate()->findOrFail($validated['marketer_id']);
+            $sales = Sale::where('marketer_id', $marketer->id)->where('status', 'completed')->sum(DB::raw('invoice_total - discount - special_discount'));
+            $slab = MarketerSlab::where('marketer_id', $marketer->id)->where('start_amount', '<=', $sales)->where('end_amount', '>=', $sales)->first();
+            $earned = round((float) $sales * (float) ($slab?->percentage ?? 0) / 100, 2);
+            if ((float) $validated['amount'] > $earned - (float) MarketerPayment::where('marketer_id', $marketer->id)->sum('amount')) {
+                throw ValidationException::withMessages(['amount' => 'Payment exceeds earned commission balance.']);
+            }
+            $account = FinancialAccount::where('name', $validated['payment_method'])->lockForUpdate()->firstOrFail();
+            PosRules::debit($account, (float) $validated['amount']);
+
+            return MarketerPayment::create($validated);
+        });
+
         return $this->successResponse($payment, 'Marketer commission paid successfully.', Response::HTTP_CREATED);
     }
 
@@ -541,6 +626,7 @@ class ErpModulesController extends BaseApiController
     public function getStockTransfers(Request $request): JsonResponse
     {
         $transfers = StockTransfer::with('items')->latest('id')->paginate(15);
+
         return $this->successResponse($transfers);
     }
 
@@ -549,16 +635,16 @@ class ErpModulesController extends BaseApiController
         $validated = $request->validate([
             'transfer_type' => 'required|string|in:warehouse,company',
             'source_name' => 'required|string',
-            'destination_name' => 'required|string',
+            'destination_name' => 'required|string|different:source_name',
             'transfer_date' => 'required|date',
             'note' => 'nullable|string',
             'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.product_id' => 'required|distinct|exists:products,id',
             'items.*.quantity' => 'required|integer|min:1',
         ]);
 
         $transfer = DB::transaction(function () use ($validated) {
-            $transferNo = 'TRF-' . date('Ymd') . '-' . str_pad((string) (StockTransfer::count() + 1), 4, '0', STR_PAD_LEFT);
+            $transferNo = PosRules::number('TRF');
             $totalQty = 0;
 
             $record = StockTransfer::create([
@@ -577,8 +663,11 @@ class ErpModulesController extends BaseApiController
                 $qty = (int) $item['quantity'];
                 $totalQty += $qty;
 
-                // Adjust stock
-                $product->decrement('available_qty', $qty);
+                // This schema tracks global stock; an internal warehouse move is not a sale.
+                PosRules::requireStock($product, $qty);
+                if ($validated['transfer_type'] === 'company') {
+                    $product->decrement('available_qty', $qty);
+                }
 
                 StockTransferItem::create([
                     'stock_transfer_id' => $record->id,
@@ -589,10 +678,12 @@ class ErpModulesController extends BaseApiController
             }
 
             $record->update(['total_items' => $totalQty]);
+
             return $record;
         });
 
         $transfer->load('items');
+
         return $this->successResponse($transfer, 'Stock transferred successfully.', Response::HTTP_CREATED);
     }
 
@@ -609,6 +700,7 @@ class ErpModulesController extends BaseApiController
         ]);
 
         $supplier = Supplier::create($validated);
+
         return $this->successResponse($supplier, 'Supplier registered successfully.', Response::HTTP_CREATED);
     }
 
@@ -624,25 +716,14 @@ class ErpModulesController extends BaseApiController
         ]);
 
         $customer = Customer::create($validated);
+
         return $this->successResponse($customer, 'Customer registered successfully.', Response::HTTP_CREATED);
     }
 
     public function getCustomerCategories(): JsonResponse
     {
         $categories = CustomerCategory::all();
-        if ($categories->isEmpty()) {
-            // Seed default areas
-            $defaults = [
-                ['name' => 'Nawabpur Road Market', 'type' => 'area', 'description' => 'Electrical wholesale hub'],
-                ['name' => 'Sadarghat Riverfront', 'type' => 'area', 'description' => 'Retail and hardware store zone'],
-                ['name' => 'Mirpur Electrical Zone', 'type' => 'area', 'description' => 'Suburban contractor accounts'],
-                ['name' => 'Uttara Commercial Sector', 'type' => 'area', 'description' => 'Builders & lighting designers'],
-            ];
-            foreach ($defaults as $d) {
-                CustomerCategory::create($d);
-            }
-            $categories = CustomerCategory::all();
-        }
+
         return $this->successResponse($categories);
     }
 
@@ -653,6 +734,7 @@ class ErpModulesController extends BaseApiController
     public function getWastages(): JsonResponse
     {
         $wastages = Wastage::with('product')->latest('id')->paginate(15);
+
         return $this->successResponse($wastages);
     }
 
@@ -672,6 +754,7 @@ class ErpModulesController extends BaseApiController
             $cost = (float) $product->cost_price;
             $loss = round($qty * $cost, 2);
 
+            PosRules::requireStock($product, $qty);
             $product->decrement('available_qty', $qty);
 
             return Wastage::create([
@@ -702,6 +785,7 @@ class ErpModulesController extends BaseApiController
         if ($request->filled('date')) {
             $query->whereDate('expense_date', $request->input('date'));
         }
+
         return $this->successResponse($query->paginate(20));
     }
 
@@ -710,15 +794,15 @@ class ErpModulesController extends BaseApiController
         $validated = $request->validate([
             'expense_category' => 'required|string',
             'title' => 'required|string',
-            'amount' => 'required|numeric|min:0.01',
+            'amount' => 'required|numeric|min:0.01|decimal:0,2',
             'expense_date' => 'required|date',
-            'account_name' => 'required|string',
+            'account_name' => 'required|string|exists:financial_accounts,name',
             'payee_name' => 'nullable|string',
             'note' => 'nullable|string',
         ]);
 
         $expense = DB::transaction(function () use ($validated) {
-            $voucherNo = 'EXP-' . date('Ymd') . '-' . str_pad((string) (GeneralExpense::count() + 1), 4, '0', STR_PAD_LEFT);
+            $voucherNo = PosRules::number('EXP');
             $amount = (float) $validated['amount'];
 
             $record = GeneralExpense::create([
@@ -733,9 +817,9 @@ class ErpModulesController extends BaseApiController
             ]);
 
             // Deduct balance from account
-            $account = FinancialAccount::where('name', $validated['account_name'])->first();
+            $account = FinancialAccount::where('name', $validated['account_name'])->lockForUpdate()->firstOrFail();
             if ($account) {
-                $account->decrement('balance', $amount);
+                PosRules::debit($account, $amount);
             }
 
             return $record;
@@ -747,14 +831,15 @@ class ErpModulesController extends BaseApiController
     public function getAccountTransfers(): JsonResponse
     {
         $transfers = AccountTransfer::latest('id')->paginate(15);
+
         return $this->successResponse($transfers);
     }
 
     public function storeAccountTransfer(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'from_account' => 'required|string',
-            'to_account' => 'required|string|different:from_account',
+            'from_account' => 'required|string|exists:financial_accounts,name',
+            'to_account' => 'required|string|exists:financial_accounts,name|different:from_account',
             'amount' => 'required|numeric|min:1',
             'transfer_date' => 'required|date',
             'reference' => 'nullable|string',
@@ -762,14 +847,14 @@ class ErpModulesController extends BaseApiController
         ]);
 
         $transfer = DB::transaction(function () use ($validated) {
-            $transferNo = 'TRF-ACC-' . date('Ymd') . '-' . str_pad((string) (AccountTransfer::count() + 1), 4, '0', STR_PAD_LEFT);
+            $transferNo = PosRules::number('TRF-ACC');
             $amount = (float) $validated['amount'];
 
-            $fromAcc = FinancialAccount::where('name', $validated['from_account'])->first();
-            $toAcc = FinancialAccount::where('name', $validated['to_account'])->first();
+            $fromAcc = FinancialAccount::where('name', $validated['from_account'])->lockForUpdate()->firstOrFail();
+            $toAcc = FinancialAccount::where('name', $validated['to_account'])->lockForUpdate()->firstOrFail();
 
             if ($fromAcc) {
-                $fromAcc->decrement('balance', $amount);
+                PosRules::debit($fromAcc, $amount);
             }
             if ($toAcc) {
                 $toAcc->increment('balance', $amount);
@@ -795,6 +880,7 @@ class ErpModulesController extends BaseApiController
 
     public function getReportData(Request $request): JsonResponse
     {
+        $request->validate(['date' => 'nullable|date', 'threshold' => 'nullable|integer|min:0']);
         $reportType = (string) $request->input('type', 'supplier_stock');
 
         switch ($reportType) {
@@ -810,13 +896,6 @@ class ErpModulesController extends BaseApiController
                 $collAmount = (float) $collectionsDate->sum('paid_amount');
                 $cashSalesAmount = (float) (clone $salesDate)->where('payment_account', 'Cash')->sum('paid_amount');
                 $bankSalesAmount = (float) (clone $salesDate)->where('payment_account', '!=', 'Cash')->sum('paid_amount');
-
-                // Fallbacks if current date is empty so report matches vibrant layout
-                if ($collAmount === 0.0 && $cashSalesAmount === 0.0) {
-                    $collAmount = (float) CustomerCollection::sum('paid_amount');
-                    $cashSalesAmount = (float) Sale::where('payment_account', 'Cash')->where('status', 'completed')->sum('paid_amount');
-                    $bankSalesAmount = (float) Sale::where('payment_account', '!=', 'Cash')->where('status', 'completed')->sum('paid_amount');
-                }
 
                 $incomeList = [
                     [
@@ -836,14 +915,16 @@ class ErpModulesController extends BaseApiController
                     ],
                 ];
 
+                $incomeList[] = ['account_name' => 'Purchase refunds', 'category' => 'Supplier returns', 'amount' => round((float) PurchaseReturn::whereDate('return_date', $date)->sum('cash_refund'), 2)];
+
                 // Expense items (Matching exact categories in Screenshot 11.04.12 AM)
                 $spPaid = (float) $supplierPaymentsDate->sum('paid_amount');
-                if ($spPaid === 0.0) {
-                    $spPaid = (float) SupplierPayment::sum('paid_amount');
-                }
 
                 $expenseCategories = [
                     'Payment' => round($spPaid, 2),
+                    'Purchase payments' => round((float) Purchase::whereDate('purchase_date', $date)->sum('paid_amount'), 2),
+                    'Sales refunds' => round((float) SaleReturn::whereDate('return_date', $date)->sum('cash_refund'), 2),
+                    'Commission payouts' => round((float) MarketerPayment::whereDate('payment_date', $date)->sum('amount'), 2),
                     'Electricity bill' => round((float) (clone $expensesDate)->where('expense_category', 'Electricity bill')->sum('amount'), 2),
                     'Employee Salary' => round((float) (clone $expensesDate)->where('expense_category', 'Employee Salary')->sum('amount'), 2),
                     'Office Expense' => round((float) (clone $expensesDate)->where('expense_category', 'Office Expense')->sum('amount'), 2),
@@ -852,16 +933,9 @@ class ErpModulesController extends BaseApiController
                     'Food Expense' => round((float) (clone $expensesDate)->where('expense_category', 'Food Expense')->sum('amount'), 2),
                     'Advanced salary' => round((float) (clone $expensesDate)->where('expense_category', 'Advanced salary')->sum('amount'), 2),
                     'Others' => round((float) (clone $expensesDate)->whereNotIn('expense_category', [
-                        'Electricity bill', 'Employee Salary', 'Office Expense', 'Transportation Cost', 'Daily Allowance', 'Food Expense', 'Advanced salary'
+                        'Electricity bill', 'Employee Salary', 'Office Expense', 'Transportation Cost', 'Daily Allowance', 'Food Expense', 'Advanced salary',
                     ])->sum('amount'), 2),
                 ];
-
-                // Ensure fallback values from all general expenses if date filtered is zero
-                foreach ($expenseCategories as $cat => $val) {
-                    if ($val === 0.0 && $cat !== 'Payment') {
-                        $expenseCategories[$cat] = round((float) GeneralExpense::where('expense_category', $cat)->sum('amount'), 2);
-                    }
-                }
 
                 $expenseList = [];
                 foreach ($expenseCategories as $cat => $amt) {
@@ -910,8 +984,8 @@ class ErpModulesController extends BaseApiController
                         'sl' => $sl++,
                         'date' => $rc->collection_date,
                         'party_name' => $rc->customer?->name ?? 'General Party',
-                        'reference' => 'COL-' . str_pad((string) $rc->id, 5, '0', STR_PAD_LEFT),
-                        'description' => 'Customer Due Collection (' . $rc->account . ')',
+                        'reference' => 'COL-'.str_pad((string) $rc->id, 5, '0', STR_PAD_LEFT),
+                        'description' => 'Customer Due Collection ('.$rc->account.')',
                         'debit' => 0.0,
                         'credit' => (float) $rc->paid_amount,
                         'balance' => max(0.0, (float) $rc->receivable_due - (float) $rc->paid_amount),
@@ -923,8 +997,8 @@ class ErpModulesController extends BaseApiController
             case 'supplier_stock':
                 $data = Supplier::with(['products'])->get()->map(function ($sup) {
                     $totalQty = $sup->products->sum('available_qty');
-                    $totalCostValue = $sup->products->sum(fn($p) => $p->available_qty * $p->cost_price);
-                    $totalSaleValue = $sup->products->sum(fn($p) => $p->available_qty * $p->unit_price);
+                    $totalCostValue = $sup->products->sum(fn ($p) => $p->available_qty * $p->cost_price);
+                    $totalSaleValue = $sup->products->sum(fn ($p) => $p->available_qty * $p->unit_price);
 
                     return [
                         'supplier_name' => $sup->name,
@@ -935,13 +1009,15 @@ class ErpModulesController extends BaseApiController
                         'sale_value' => round($totalSaleValue, 2),
                     ];
                 });
+
                 return $this->successResponse($data, 'Supplier wise stock report');
 
             case 'stock_alert':
                 // Product Stock Alert Report (Screenshot 11.02.00 AM)
                 $threshold = (int) $request->input('threshold', 25);
                 $lowStock = Product::with('supplier')
-                    ->where('available_qty', '<=', $threshold)
+                    ->where('is_active', true)
+                    ->when($request->filled('threshold'), fn ($q) => $q->where('available_qty', '<=', $threshold), fn ($q) => $q->whereColumn('available_qty', '<=', 'low_stock_threshold'))
                     ->orderBy('available_qty', 'asc')
                     ->get()
                     ->map(function ($p) {
@@ -953,29 +1029,31 @@ class ErpModulesController extends BaseApiController
                             'cost_price' => $p->cost_price,
                             'unit_price' => $p->unit_price,
                             'supplier_name' => $p->supplier?->name ?? 'General Supplier',
-                            'supplier_phone' => $p->supplier?->phone ?? '01711-000000',
+                            'supplier_phone' => $p->supplier?->phone ?? '',
                         ];
                     });
+
                 return $this->successResponse($lowStock, 'Stock alert report');
 
             case 'top_sales':
-                $topProducts = SaleItem::select('product_id', 'product_name', DB::raw('SUM(quantity) as total_qty_sold'), DB::raw('SUM(subtotal) as total_revenue'), DB::raw('SUM(profit) as total_profit'))
+                $topProducts = SaleItem::whereHas('sale', fn ($q) => $q->where('status', 'completed'))->select('product_id', 'product_name', DB::raw('SUM(quantity) as total_qty_sold'), DB::raw('SUM(subtotal) as total_revenue'), DB::raw('SUM(profit) as total_profit'))
                     ->groupBy('product_id', 'product_name')
                     ->orderByDesc('total_qty_sold')
                     ->limit(20)
                     ->get();
+
                 return $this->successResponse($topProducts, 'Top selling products report');
 
             case 'cash_flow':
                 $totalCashSales = Sale::where('payment_account', 'Cash')->where('status', 'completed')->sum('paid_amount');
                 $totalBankSales = Sale::where('payment_account', '!=', 'Cash')->where('status', 'completed')->sum('paid_amount');
                 $totalCollections = CustomerCollection::sum('paid_amount');
-                $totalInflow = $totalCashSales + $totalBankSales + $totalCollections;
+                $totalInflow = $totalCashSales + $totalBankSales + $totalCollections + PurchaseReturn::sum('cash_refund');
 
                 $totalPurchasesPaid = Purchase::sum('paid_amount');
                 $totalSupplierPayments = SupplierPayment::sum('paid_amount');
                 $totalGeneralExpenses = GeneralExpense::sum('amount');
-                $totalOutflow = $totalPurchasesPaid + $totalSupplierPayments + $totalGeneralExpenses;
+                $totalOutflow = $totalPurchasesPaid + $totalSupplierPayments + $totalGeneralExpenses + SaleReturn::sum('cash_refund') + MarketerPayment::sum('amount');
                 $netCash = $totalInflow - $totalOutflow;
 
                 $accounts = FinancialAccount::all();
@@ -997,16 +1075,21 @@ class ErpModulesController extends BaseApiController
 
                 return $this->successResponse([
                     'date' => $date,
-                    'total_sales' => round($salesToday->sum('payable_amount'), 2),
+                    'total_sales' => round($salesToday->sum(DB::raw(PosRules::revenue())), 2),
                     'cash_received' => round($salesToday->sum('paid_amount'), 2),
                     'new_dues' => round($salesToday->sum('due_amount'), 2),
                     'collections' => round($collectionsToday->sum('paid_amount'), 2),
                     'purchases' => round($purchasesToday->sum('total_payable'), 2),
                     'purchases_paid' => round($purchasesToday->sum('paid_amount'), 2),
+                    'supplier_payments' => round((float) SupplierPayment::whereDate('payment_date', $date)->sum('paid_amount'), 2),
+                    'operating_expenses' => round((float) GeneralExpense::whereDate('expense_date', $date)->sum('amount'), 2),
+                    'sales_refunds' => round((float) SaleReturn::whereDate('return_date', $date)->sum('cash_refund'), 2),
+                    'purchase_refunds' => round((float) PurchaseReturn::whereDate('return_date', $date)->sum('cash_refund'), 2),
+                    'commission_payouts' => round((float) MarketerPayment::whereDate('payment_date', $date)->sum('amount'), 2),
                 ], 'Daily closing report');
 
             default:
-                return $this->successResponse([], 'Report data');
+                throw ValidationException::withMessages(['type' => 'This report is not supported.']);
         }
     }
 }

@@ -7,14 +7,26 @@ namespace Database\Seeders;
 use App\Models\Customer;
 use App\Models\Designation;
 use App\Models\FinancialAccount;
+use App\Models\GeneralExpense;
 use App\Models\Marketer;
+use App\Models\MarketerSlab;
 use App\Models\Outlet;
 use App\Models\Permission;
 use App\Models\Product;
+use App\Models\Purchase;
+use App\Models\PurchaseItem;
+use App\Models\PurchaseReturn;
+use App\Models\PurchaseReturnItem;
 use App\Models\Sale;
 use App\Models\SaleItem;
+use App\Models\SaleReturn;
+use App\Models\SaleReturnItem;
+use App\Models\StockTransfer;
+use App\Models\StockTransferItem;
 use App\Models\Supplier;
+use App\Models\SupplierPayment;
 use App\Models\User;
+use App\Models\Wastage;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
 
@@ -22,8 +34,18 @@ class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
+        if (app()->isProduction()) {
+            throw new \RuntimeException('Demo seeding is disabled in production. Use pos:create-admin to provision an owner.');
+        }
         // 1. Create Permissions
         $permissionsData = [
+            ['slug' => 'sales.returns', 'name' => 'Return & exchange', 'module' => 'Sales'],
+            ['slug' => 'purchases.view', 'name' => 'View purchases', 'module' => 'Purchases'],
+            ['slug' => 'purchases.create', 'name' => 'Create purchases', 'module' => 'Purchases'],
+            ['slug' => 'purchases.payments', 'name' => 'Pay suppliers', 'module' => 'Purchases'],
+            ['slug' => 'purchases.returns', 'name' => 'Return purchases', 'module' => 'Purchases'],
+            ['slug' => 'accounts.expenses', 'name' => 'Record expenses', 'module' => 'General Accounts'],
+            ['slug' => 'accounts.transfers', 'name' => 'Transfer funds', 'module' => 'General Accounts'],
             // Sales
             ['name' => 'Create Sale', 'slug' => 'sales.create', 'module' => 'Sales', 'description' => 'Can perform new sales and supplier-wise sales'],
             ['name' => 'View Sales', 'slug' => 'sales.view', 'module' => 'Sales', 'description' => 'Can view sales invoices and sale history'],
@@ -79,10 +101,15 @@ class DatabaseSeeder extends Seeder
 
         // Assign Permissions to Roles
         // Admin gets all
-        $adminRole->permissions()->sync(array_values(array_map(fn($p) => $p->id, $permissionModels)));
+        $adminRole->permissions()->sync(array_values(array_map(fn ($p) => $p->id, $permissionModels)));
 
         // Manager gets sales, collections, inventory, accounts, reports
         $managerRole->permissions()->sync([
+            $permissionModels['sales.returns']->id,
+            $permissionModels['purchases.view']->id,
+            $permissionModels['purchases.create']->id,
+            $permissionModels['purchases.returns']->id,
+            $permissionModels['purchases.payments']->id,
             $permissionModels['sales.create']->id,
             $permissionModels['sales.view']->id,
             $permissionModels['sales.edit']->id,
@@ -97,6 +124,7 @@ class DatabaseSeeder extends Seeder
 
         // Cashier gets POS selling, viewing sales, holding sales, and collections
         $cashierRole->permissions()->sync([
+            $permissionModels['collections.view']->id,
             $permissionModels['sales.create']->id,
             $permissionModels['sales.view']->id,
             $permissionModels['sales.hold']->id,
@@ -106,6 +134,11 @@ class DatabaseSeeder extends Seeder
 
         // Accountant gets collections, accounts, reports
         $accountantRole->permissions()->sync([
+            $permissionModels['inventory.view']->id,
+            $permissionModels['accounts.expenses']->id,
+            $permissionModels['accounts.transfers']->id,
+            $permissionModels['purchases.view']->id,
+            $permissionModels['purchases.payments']->id,
             $permissionModels['sales.view']->id,
             $permissionModels['collections.create']->id,
             $permissionModels['collections.view']->id,
@@ -366,7 +399,7 @@ class DatabaseSeeder extends Seeder
         }
 
         // 11. Initial Purchases & Chalan Records (From Image 11.00.39 AM)
-        $purchase1 = \App\Models\Purchase::firstOrCreate(['chalan_no' => 'CH-2026-0891'], [
+        $purchase1 = Purchase::firstOrCreate(['chalan_no' => 'CH-2026-0891'], [
             'supplier_id' => $sup1->id,
             'outlet_id' => $outlet1->id,
             'purchase_date' => '2026-10-02',
@@ -381,7 +414,7 @@ class DatabaseSeeder extends Seeder
             'status' => 'completed',
         ]);
 
-        \App\Models\PurchaseItem::firstOrCreate([
+        PurchaseItem::firstOrCreate([
             'purchase_id' => $purchase1->id,
             'product_id' => $p1->id,
         ], [
@@ -393,7 +426,7 @@ class DatabaseSeeder extends Seeder
             'subtotal' => 80 * $p1->cost_price,
         ]);
 
-        \App\Models\SupplierPayment::firstOrCreate(['payment_no' => 'SPAY-20261003-0001'], [
+        SupplierPayment::firstOrCreate(['payment_no' => 'SPAY-20261003-0001'], [
             'supplier_id' => $sup1->id,
             'payment_date' => '2026-10-03',
             'payment_method' => 'Bank Transfer',
@@ -406,7 +439,7 @@ class DatabaseSeeder extends Seeder
         ]);
 
         // 12. Initial Sale Returns & Exchanges (From Image 11.00.22 AM & 11.00.28 AM)
-        $return1 = \App\Models\SaleReturn::firstOrCreate(['return_no' => 'RET-20261004-001'], [
+        $return1 = SaleReturn::firstOrCreate(['return_no' => 'RET-20261004-001'], [
             'invoice_id' => '#S-20261005021',
             'customer_id' => $c3->id,
             'supplier_id' => $sup1->id,
@@ -420,7 +453,7 @@ class DatabaseSeeder extends Seeder
             'comments' => 'Customer replaced defective wire coil with 2 gang switch',
         ]);
 
-        \App\Models\SaleReturnItem::firstOrCreate([
+        SaleReturnItem::firstOrCreate([
             'sale_return_id' => $return1->id,
             'product_id' => $p1->id,
             'item_type' => 'return',
@@ -435,21 +468,21 @@ class DatabaseSeeder extends Seeder
         ]);
 
         // 13. Marketer Slabs (From Image 11.00.53 AM)
-        \App\Models\MarketerSlab::firstOrCreate(['marketer_id' => $m1->id, 'start_amount' => 1.00], [
+        MarketerSlab::firstOrCreate(['marketer_id' => $m1->id, 'start_amount' => 1.00], [
             'end_amount' => 100000.00,
             'percentage' => 3.00,
         ]);
-        \App\Models\MarketerSlab::firstOrCreate(['marketer_id' => $m1->id, 'start_amount' => 100001.00], [
+        MarketerSlab::firstOrCreate(['marketer_id' => $m1->id, 'start_amount' => 100001.00], [
             'end_amount' => 500000.00,
             'percentage' => 5.00,
         ]);
-        \App\Models\MarketerSlab::firstOrCreate(['marketer_id' => $m1->id, 'start_amount' => 500001.00], [
+        MarketerSlab::firstOrCreate(['marketer_id' => $m1->id, 'start_amount' => 500001.00], [
             'end_amount' => 2000000.00,
             'percentage' => 7.50,
         ]);
 
         // 14. Stock Transfers (From Image 11.01.04 AM & 11.01.08 AM)
-        $trf1 = \App\Models\StockTransfer::firstOrCreate(['transfer_no' => 'TRF-20261003-001'], [
+        $trf1 = StockTransfer::firstOrCreate(['transfer_no' => 'TRF-20261003-001'], [
             'transfer_type' => 'warehouse',
             'source_name' => 'DATTA & BROTHERS ELECTRICS (Main Hub)',
             'destination_name' => 'SMART ACCOUNT CENTRAL (Branch 2)',
@@ -459,7 +492,7 @@ class DatabaseSeeder extends Seeder
             'note' => 'Replenishing central showroom display units',
         ]);
 
-        \App\Models\StockTransferItem::firstOrCreate([
+        StockTransferItem::firstOrCreate([
             'stock_transfer_id' => $trf1->id,
             'product_id' => $p1->id,
         ], [
@@ -468,7 +501,7 @@ class DatabaseSeeder extends Seeder
         ]);
 
         // 15. Wastage Records (From Image 11.02.09 AM)
-        \App\Models\Wastage::firstOrCreate(['product_id' => $p1->id, 'wastage_date' => '2026-10-03'], [
+        Wastage::firstOrCreate(['product_id' => $p1->id, 'wastage_date' => '2026-10-03'], [
             'product_name' => $p1->name,
             'quantity' => 2,
             'unit_cost' => $p1->cost_price,
@@ -489,11 +522,11 @@ class DatabaseSeeder extends Seeder
         ];
 
         foreach ($expenses as $exp) {
-            \App\Models\GeneralExpense::firstOrCreate(['voucher_no' => $exp['voucher_no']], $exp);
+            GeneralExpense::firstOrCreate(['voucher_no' => $exp['voucher_no']], $exp);
         }
 
         // 17. Sample Purchase Return (Image 11.00.35 AM)
-        $pret = \App\Models\PurchaseReturn::firstOrCreate(['return_no' => 'PRET-20261004-001'], [
+        $pret = PurchaseReturn::firstOrCreate(['return_no' => 'PRET-20261004-001'], [
             'chalan_no' => 'CH-88219-SUPER',
             'supplier_id' => $sup1->id,
             'outlet_id' => $outlet1->id,
@@ -506,7 +539,7 @@ class DatabaseSeeder extends Seeder
             'status' => 'completed',
         ]);
 
-        \App\Models\PurchaseReturnItem::firstOrCreate([
+        PurchaseReturnItem::firstOrCreate([
             'purchase_return_id' => $pret->id,
             'product_id' => $p1->id,
         ], [

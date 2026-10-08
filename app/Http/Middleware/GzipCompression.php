@@ -22,7 +22,7 @@ class GzipCompression
         $response = $next($request);
 
         $enabled = (bool) Config::get('security.performance.enable_gzip_compression', true);
-        if (!$enabled) {
+        if (! $enabled) {
             return $response;
         }
 
@@ -32,7 +32,7 @@ class GzipCompression
         }
 
         $acceptEncoding = $request->header('Accept-Encoding', '');
-        if (!str_contains($acceptEncoding, 'gzip') || !function_exists('gzencode')) {
+        if (! preg_match('/(?:^|,)\s*gzip\s*(?:;\s*q=(?!0(?:\.0*)?(?:\s*,|\s*$))[0-9.]+)?\s*(?:,|$)/i', $acceptEncoding) || ! function_exists('gzencode') || $response->headers->has('Content-Encoding')) {
             return $response;
         }
 
@@ -47,7 +47,7 @@ class GzipCompression
             $response->setContent($compressed);
             $response->headers->set('Content-Encoding', 'gzip');
             $response->headers->set('Content-Length', (string) strlen($compressed));
-            $response->headers->set('Vary', 'Accept-Encoding');
+            $response->setVary('Accept-Encoding', false);
         }
 
         return $response;

@@ -11,6 +11,7 @@ use App\DTOs\Auth\LoginDTO;
 use App\DTOs\Auth\RegisterDTO;
 use App\Models\User;
 use Illuminate\Auth\AuthenticationException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
@@ -44,7 +45,7 @@ class AuthService implements AuthServiceInterface
     {
         $user = $this->userRepository->findByEmail($dto->email);
 
-        if (!$user || !Hash::check($dto->password, $user->password)) {
+        if (! $user || ! Hash::check($dto->password, $user->password)) {
             throw new AuthenticationException('Invalid email or password credentials.');
         }
 
@@ -53,22 +54,28 @@ class AuthService implements AuthServiceInterface
 
     public function refresh(string $refreshToken): array
     {
-        $payload = $this->tokenService->decodeAndDecryptToken($refreshToken);
+        return Cache::lock('pos:refresh:'.hash('sha256', $refreshToken), 10)->block(5, function () use ($refreshToken): array {
+            try {
+                $payload = $this->tokenService->decodeAndDecryptToken($refreshToken);
+            } catch (\Throwable) {
+                throw new AuthenticationException('Invalid or expired refresh token.');
+            }
 
-        if ($payload->tokenType !== 'refresh') {
-            throw new AuthenticationException('Invalid token type provided for refresh.');
-        }
+            if ($payload->tokenType !== 'refresh') {
+                throw new AuthenticationException('Invalid token type provided for refresh.');
+            }
 
-        /** @var User|null $user */
-        $user = $this->userRepository->findById($payload->userId);
-        if (!$user) {
-            throw new AuthenticationException('User associated with token no longer exists.');
-        }
+            /** @var User|null $user */
+            $user = $this->userRepository->findById($payload->userId);
+            if (! $user) {
+                throw new AuthenticationException('User associated with token no longer exists.');
+            }
 
-        // Single-use refresh token: revoke old refresh token upon rotation
-        $this->tokenService->revokeToken($refreshToken);
+            // Single-use refresh token: revoke old refresh token upon rotation
+            $this->tokenService->revokeToken($refreshToken);
 
-        return $this->generateAuthPayload($user);
+            return $this->generateAuthPayload($user);
+        });
     }
 
     public function logout(string $token): bool
@@ -81,7 +88,7 @@ class AuthService implements AuthServiceInterface
         /** @var User|null $user */
         $user = $this->userRepository->findById($userId);
 
-        if (!$user) {
+        if (! $user) {
             throw new AuthenticationException('User not found.');
         }
 

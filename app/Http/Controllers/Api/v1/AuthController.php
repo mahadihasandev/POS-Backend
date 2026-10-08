@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\v1;
 
 use App\Contracts\AuthServiceInterface;
+use App\Contracts\TokenServiceInterface;
 use App\DTOs\Auth\LoginDTO;
 use App\DTOs\Auth\RegisterDTO;
 use App\Http\Requests\Auth\LoginRequest;
@@ -87,9 +88,20 @@ class AuthController extends BaseApiController
      */
     public function logout(Request $request): JsonResponse
     {
+        $data = $request->validate(['refresh_token' => 'nullable|string']);
+        if (! empty($data['refresh_token'])) {
+            $tokens = app(TokenServiceInterface::class);
+            try {
+                $payload = $tokens->decodeAndDecryptToken($data['refresh_token']);
+                if ($payload->userId === $request->user()->id && $payload->tokenType === 'refresh') {
+                    $tokens->revokeToken($data['refresh_token']);
+                }
+            } catch (\Throwable) { /* Already expired or revoked. */
+            }
+        }
         $token = $request->bearerToken();
 
-        if (!empty($token)) {
+        if (! empty($token)) {
             $this->authService->logout($token);
         }
 
