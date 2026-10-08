@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Contracts\TokenServiceInterface;
+use App\Models\Designation;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -25,8 +27,9 @@ class AuthApiTest extends TestCase
         $guestResponse->assertStatus(401);
 
         // 2. Authenticated user can register a new user from inside the webapp
-        $admin = User::factory()->create();
-        $tokenService = app(\App\Contracts\TokenServiceInterface::class);
+        $role = Designation::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::factory()->create(['designation_id' => $role->id]);
+        $tokenService = app(TokenServiceInterface::class);
         $token = $tokenService->generateAccessToken($admin);
 
         $authResponse = $this->withHeader('Authorization', "Bearer {$token}")
@@ -50,6 +53,15 @@ class AuthApiTest extends TestCase
             ]);
 
         $this->assertDatabaseHas('users', ['email' => 'alice@example.com']);
+    }
+
+    public function test_refresh_rotates_once_and_invalid_tokens_return_unauthorized(): void
+    {
+        $user = User::factory()->create();
+        $refresh = app(TokenServiceInterface::class)->generateRefreshToken($user);
+        $this->postJson('/api/v1/auth/refresh', ['refresh_token' => $refresh])->assertOk()->assertJsonStructure(['data' => ['access_token', 'refresh_token']]);
+        $this->postJson('/api/v1/auth/refresh', ['refresh_token' => $refresh])->assertUnauthorized();
+        $this->postJson('/api/v1/auth/refresh', ['refresh_token' => 'invalid-token'])->assertUnauthorized();
     }
 
     public function test_user_can_login(): void
@@ -77,7 +89,7 @@ class AuthApiTest extends TestCase
             'email' => 'charlie@example.com',
         ]);
 
-        $tokenService = app(\App\Contracts\TokenServiceInterface::class);
+        $tokenService = app(TokenServiceInterface::class);
         $accessToken = $tokenService->generateAccessToken($user);
 
         // Fetch profile

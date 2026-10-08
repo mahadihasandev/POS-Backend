@@ -7,360 +7,278 @@ namespace App\Http\Controllers\Api\v1;
 use App\Models\Customer;
 use App\Models\CustomerCollection;
 use App\Models\FinancialAccount;
+use App\Models\GeneralExpense;
 use App\Models\Marketer;
 use App\Models\Outlet;
 use App\Models\Product;
+use App\Models\Purchase;
 use App\Models\Sale;
-use App\Models\SaleItem;
 use App\Models\Supplier;
+use App\Models\User;
+use App\Support\PosRules;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Symfony\Component\HttpFoundation\Response;
+use Illuminate\Validation\ValidationException;
 
 class PosController extends BaseApiController
 {
-    /**
-     * Ultra-fast bootstrap endpoint providing cashier with
-     * outlets, customers, suppliers, marketers, products, and accounts in 1 roundtrip.
-     */
     public function bootstrap(Request $request): JsonResponse
     {
-        $outlets = Outlet::select('id', 'name', 'code', 'address')->get();
-        $suppliers = Supplier::select('id', 'name', 'code')->get();
-        $customers = Customer::select('id', 'name', 'code', 'phone', 'area', 'previous_due', 'advanced_amount')->get();
-        $marketers = Marketer::select('id', 'name')->get();
-        $products = Product::select('id', 'supplier_id', 'name', 'code', 'barcode', 'available_qty', 'unit_price', 'cost_price', 'unit')->get();
-        $accounts = FinancialAccount::select('id', 'name', 'account_type', 'account_number', 'balance')->get();
-        $heldCount = Sale::where('status', 'hold')->count();
+        $user = $request->user();
 
         return $this->successResponse([
-            'outlets' => $outlets,
-            'suppliers' => $suppliers,
-            'customers' => $customers,
-            'marketers' => $marketers,
-            'products' => $products,
-            'accounts' => $accounts,
-            'held_count' => $heldCount,
-        ], 'POS bootstrap data loaded successfully.');
+            'outlets' => Outlet::select('id', 'name', 'code', 'address', 'phone')->get(),
+            'suppliers' => Supplier::select('id', 'name', 'code', 'phone')->get()->map(function ($supplier) use ($user) {
+                if ($user->hasPermission('purchases.view')) {
+                    $supplier->setAttribute('previous_due', PosRules::supplierDue($supplier->id));
+                }
+
+                return $supplier;
+            }),
+            'customers' => Customer::select('id', 'name', 'code', 'phone', 'area', 'previous_due', 'advanced_amount')->get(),
+            'marketers' => Marketer::select('id', 'name')->get(),
+            'products' => Product::all(),
+            'accounts' => FinancialAccount::select($user->hasPermission('accounts.view')
+                ? ['id', 'name', 'account_type', 'account_number', 'balance']
+                : ['id', 'name', 'account_type'])->get(),
+            'held_count' => $user->hasPermission('sales.hold') ? Sale::where('status', 'hold')->count() : 0,
+        ]);
     }
 
-    /**
-     * Fast barcode / SKU / name product search.
-     */
     public function searchProducts(Request $request): JsonResponse
     {
-        $query = (string) $request->input('q', '');
-        $supplierId = $request->input('supplier_id');
+        $data = $request->validate(['q' => 'nullable|string|max:255', 'supplier_id' => 'nullable|exists:suppliers,id']);
+        $term = $data['q'] ?? '';
 
-        $products = Product::query()
-            ->when($supplierId, fn($q) => $q->where('supplier_id', $supplierId))
-            ->where(function ($q) use ($query): void {
-                $q->where('barcode', 'like', "%{$query}%")
-                  ->orWhere('code', 'like', "%{$query}%")
-                  ->orWhere('name', 'like', "%{$query}%");
-            })
-            ->limit(20)
-            ->get();
-
-        return $this->successResponse($products);
+        return $this->successResponse(Product::where('is_active', true)
+            ->when($data['supplier_id'] ?? null, fn ($q, $id) => $q->where('supplier_id', $id))
+            ->where(fn ($q) => $q->where('barcode', 'like', "%{$term}%")->orWhere('code', 'like', "%{$term}%")->orWhere('name', 'like', "%{$term}%"))
+            ->limit(30)->get());
     }
 
-    /**
-     * Create and complete a Sale with atomic database consistency.
-     */
     public function storeSale(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'outlet_id' => 'nullable|exists:outlets,id',
+        $data = $request->validate([
+            'request_id' => 'nullable|uuid',
+            'held_sale_id' => 'nullable|integer|exists:sales,id',
+            'outlet_id' => 'required|exists:outlets,id',
             'customer_id' => 'nullable|exists:customers,id',
             'supplier_id' => 'nullable|exists:suppliers,id',
             'marketer_id' => 'nullable|exists:marketers,id',
-            'sale_date' => 'required|date',
-            'sale_type' => 'required|string|in:normal,supplier_wise',
-            'note' => 'nullable|string',
-            'discount' => 'numeric|min:0',
-            'special_discount' => 'numeric|min:0',
-            'delivery_charge' => 'numeric|min:0',
-            'delivery_payer' => 'required|string|in:company,customer',
-            'payment_account' => 'required|string',
-            'paid_amount' => 'required|numeric|min:0',
-            'is_hold' => 'boolean',
-            'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required|exists:products,id',
+            'sale_date' => 'required|date', 'sale_type' => 'required|in:normal,supplier_wise',
+            'note' => 'nullable|string|max:2000',
+            'discount' => 'numeric|min:0', 'special_discount' => 'numeric|min:0',
+            'delivery_charge' => 'numeric|min:0', 'delivery_payer' => 'required|in:company,customer',
+            'payment_account' => 'required|string|exists:financial_accounts,name',
+            'paid_amount' => 'required|numeric|min:0', 'is_hold' => 'boolean',
+            'items' => 'required|array|min:1|max:500',
+            'items.*.product_id' => 'required|integer|distinct|exists:products,id',
             'items.*.quantity' => 'required|integer|min:1',
-            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.unit_price' => 'required|numeric|min:0|max:9999999999.99',
             'items.*.discount_percent' => 'numeric|min:0|max:100',
         ]);
+        $user = $request->user();
+        $hold = (bool) ($data['is_hold'] ?? false);
+        if ($hold || ! empty($data['held_sale_id'])) {
+            abort_unless($user->hasPermission('sales.hold'), 403);
+        }
+        $sale = DB::transaction(function () use ($data, $user, $hold) {
+            // Serialize retries from one cashier; stock/customer rows protect other cashiers.
+            User::lockForUpdate()->findOrFail($user->id);
+            if (! empty($data['request_id'])) {
+                $existing = Sale::where('request_id', $data['request_id'])->first();
+                if ($existing) {
+                    abort_unless($existing->user_id === $user->id, 403);
 
-        $user = $this->getAuthenticatedUser($request);
-        $isHold = (bool) ($validated['is_hold'] ?? false);
-
-        $sale = DB::transaction(function () use ($validated, $user, $isHold) {
-            // Generate unique invoice number
-            $invoiceNumber = '#S-' . date('Ymd') . str_pad((string) (Sale::max('id') + 1), 4, '0', STR_PAD_LEFT);
-
-            // Compute items subtotal & profit
-            $invoiceTotal = 0.0;
-            $itemsData = [];
-
-            foreach ($validated['items'] as $item) {
-                $product = Product::lockForUpdate()->find($item['product_id']);
+                    return $existing;
+                }
+            }
+            $held = ! empty($data['held_sale_id'])
+                ? Sale::where('status', 'hold')->lockForUpdate()->findOrFail($data['held_sale_id']) : null;
+            if ($held && ($held->outlet_id !== (int) $data['outlet_id'] || $held->sale_type !== $data['sale_type'])) {
+                throw ValidationException::withMessages(['held_sale_id' => 'Resume this sale in its original branch and checkout type.']);
+            }
+            $customer = ! empty($data['customer_id']) ? Customer::lockForUpdate()->findOrFail($data['customer_id']) : null;
+            $account = FinancialAccount::where('name', $data['payment_account'])->lockForUpdate()->firstOrFail();
+            $products = Product::whereIn('id', array_column($data['items'], 'product_id'))->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+            $total = 0.0;
+            $rows = [];
+            foreach ($data['items'] as $item) {
+                $product = $products->get($item['product_id']);
+                if (! $product || ! $product->is_active) {
+                    throw ValidationException::withMessages(['items' => 'An item is unavailable. Refresh the catalog.']);
+                }
                 $qty = (int) $item['quantity'];
-                $price = (float) $item['unit_price'];
-                $disPercent = (float) ($item['discount_percent'] ?? 0);
-                $lineSubtotal = round($qty * $price * (1 - $disPercent / 100), 2);
-                $lineProfit = round($lineSubtotal - ($product->cost_price * $qty), 2);
-
-                $invoiceTotal += $lineSubtotal;
-
-                $itemsData[] = [
-                    'product' => $product,
-                    'quantity' => $qty,
-                    'unit_price' => $price,
-                    'cost_price' => (float) $product->cost_price,
-                    'discount_percent' => $disPercent,
-                    'subtotal' => $lineSubtotal,
-                    'profit' => $lineProfit,
-                ];
-
-                // Decrement inventory if completed sale
-                if (!$isHold) {
+                if (! $hold) {
+                    PosRules::requireStock($product, $qty);
                     $product->decrement('available_qty', $qty);
                 }
+                $price = round((float) $item['unit_price'], 2);
+                $percent = round((float) ($item['discount_percent'] ?? 0), 2);
+                $subtotal = round($qty * $price * (1 - $percent / 100), 2);
+                $total += $subtotal;
+                $rows[] = [
+                    'product_id' => $product->id, 'product_name' => $product->name, 'product_code' => $product->code,
+                    'quantity' => $qty, 'unit_price' => $price, 'cost_price' => $product->cost_price,
+                    'discount_percent' => $percent, 'subtotal' => $subtotal,
+                    'profit' => round($subtotal - $qty * (float) $product->cost_price, 2),
+                ];
             }
-
-            $discount = (float) ($validated['discount'] ?? 0);
-            $specialDiscount = (float) ($validated['special_discount'] ?? 0);
-            $deliveryCharge = (float) ($validated['delivery_charge'] ?? 0);
-
-            // Fetch customer dues/advance
-            $customer = !empty($validated['customer_id']) ? Customer::find($validated['customer_id']) : null;
-            $prevDue = $customer ? (float) $customer->previous_due : 0.0;
-            $advanced = $customer ? (float) $customer->advanced_amount : 0.0;
-
-            $totalPayable = max(0.0, ($invoiceTotal - $discount - $specialDiscount + ($validated['delivery_payer'] === 'customer' ? $deliveryCharge : 0)) + $prevDue - $advanced);
-            $paid = (float) $validated['paid_amount'];
-            $changeReturn = max(0.0, $paid - $totalPayable);
-            $dueAmount = max(0.0, $totalPayable - $paid);
-
-            $sale = Sale::create([
-                'invoice_id' => $invoiceNumber,
-                'outlet_id' => $validated['outlet_id'] ?? null,
-                'customer_id' => $validated['customer_id'] ?? null,
-                'supplier_id' => $validated['supplier_id'] ?? null,
-                'user_id' => $user->id,
-                'marketer_id' => $validated['marketer_id'] ?? null,
-                'sale_date' => $validated['sale_date'],
-                'sale_type' => $validated['sale_type'],
-                'note' => $validated['note'] ?? null,
-                'invoice_total' => $invoiceTotal,
-                'discount' => $discount,
-                'special_discount' => $specialDiscount,
-                'delivery_charge' => $deliveryCharge,
-                'delivery_payer' => $validated['delivery_payer'],
-                'previous_due' => $prevDue,
-                'advanced' => $advanced,
-                'payable_amount' => $totalPayable,
-                'paid_amount' => min($paid, $totalPayable),
-                'due_amount' => $dueAmount,
-                'change_return' => $changeReturn,
-                'payment_account' => $validated['payment_account'],
-                'status' => $isHold ? 'hold' : 'completed',
-            ]);
-
-            // Save line items
-            foreach ($itemsData as $row) {
-                SaleItem::create([
-                    'sale_id' => $sale->id,
-                    'product_id' => $row['product']->id,
-                    'product_name' => $row['product']->name,
-                    'product_code' => $row['product']->code,
-                    'quantity' => $row['quantity'],
-                    'unit_price' => $row['unit_price'],
-                    'cost_price' => $row['cost_price'],
-                    'discount_percent' => $row['discount_percent'],
-                    'subtotal' => $row['subtotal'],
-                    'profit' => $row['profit'],
-                ]);
+            $discount = round((float) ($data['discount'] ?? 0), 2);
+            $special = round((float) ($data['special_discount'] ?? 0), 2);
+            if ($discount + $special > $total) {
+                throw ValidationException::withMessages(['discount' => 'Discounts cannot exceed the invoice total.']);
             }
-
-            // Update customer balance & financial account if not hold
-            if (!$isHold) {
-                if ($customer) {
-                    $customer->update(['previous_due' => $dueAmount]);
+            $delivery = round((float) ($data['delivery_charge'] ?? 0), 2);
+            $prior = (float) ($customer?->previous_due ?? 0);
+            $gross = round($total - $discount - $special + ($data['delivery_payer'] === 'customer' ? $delivery : 0) + $prior, 2);
+            $advanceUsed = min((float) ($customer?->advanced_amount ?? 0), $gross);
+            $payable = round($gross - $advanceUsed, 2);
+            $tendered = $hold ? 0 : round((float) $data['paid_amount'], 2);
+            $paid = min($tendered, $payable);
+            $due = round($payable - $paid, 2);
+            if (! $hold && ! $customer && $due > 0) {
+                throw ValidationException::withMessages(['customer_id' => 'Choose a customer for a credit sale, or receive the full amount.']);
+            }
+            $attributes = [
+                'request_id' => $data['request_id'] ?? null,
+                'outlet_id' => $data['outlet_id'], 'customer_id' => $data['customer_id'] ?? null,
+                'supplier_id' => $data['supplier_id'] ?? null, 'marketer_id' => $data['marketer_id'] ?? null,
+                'user_id' => $user->id, 'sale_date' => $data['sale_date'], 'sale_type' => $data['sale_type'],
+                'note' => $data['note'] ?? null, 'invoice_total' => $total, 'discount' => $discount,
+                'special_discount' => $special, 'delivery_charge' => $delivery, 'delivery_payer' => $data['delivery_payer'],
+                'previous_due' => $prior, 'advanced' => $advanceUsed, 'payable_amount' => $payable,
+                'paid_amount' => $paid, 'due_amount' => $due, 'change_return' => round(max(0, $tendered - $payable), 2),
+                'payment_account' => $data['payment_account'], 'status' => $hold ? 'hold' : 'completed',
+            ];
+            if ($held) {
+                $held->update($attributes);
+                $held->items()->delete();
+                $sale = $held;
+            } else {
+                $sale = Sale::create(['invoice_id' => PosRules::number('S')] + $attributes);
+            }
+            if ($total > 0 && $discount + $special > 0) {
+                $remainingDiscount = $discount + $special;
+                foreach ($rows as $index => &$row) {
+                    $share = $index === array_key_last($rows) ? $remainingDiscount : round(($discount + $special) * $row['subtotal'] / $total, 2);
+                    $remainingDiscount = round($remainingDiscount - $share, 2);
+                    $row['profit'] = round($row['profit'] - $share, 2);
                 }
-
-                $account = FinancialAccount::where('name', $validated['payment_account'])->first();
-                if ($account && $paid > 0) {
-                    $actualReceipt = min($paid, $totalPayable);
-                    $account->increment('balance', $actualReceipt);
-                }
+                unset($row);
+            }
+            $sale->items()->createMany($rows);
+            if (! $hold) {
+                $customer?->update(['previous_due' => $due, 'advanced_amount' => round((float) $customer->advanced_amount - $advanceUsed, 2)]);
+                $account->increment('balance', $paid);
             }
 
             return $sale;
         });
 
-        $sale->load(['items', 'customer', 'supplier', 'user', 'marketer']);
-
-        return $this->successResponse(
-            $sale,
-            $isHold ? 'Sale held successfully in queue.' : 'Sale completed successfully! Invoice ready for print.',
-            Response::HTTP_CREATED
-        );
+        return $this->successResponse($sale->load(['items', 'customer', 'supplier', 'user', 'marketer', 'outlet']), $hold ? 'Sale held.' : 'Sale completed.', 201);
     }
 
-    /**
-     * Get paginated sales history with filters.
-     */
     public function getSales(Request $request): JsonResponse
     {
-        $query = Sale::with(['customer', 'supplier', 'user', 'marketer', 'items'])
+        $request->validate(['start_date' => 'nullable|date', 'end_date' => 'nullable|date|after_or_equal:start_date', 'page' => 'nullable|integer|min:1']);
+
+        return $this->successResponse(Sale::with(['customer', 'supplier', 'user', 'marketer', 'items', 'outlet'])
             ->where('status', '!=', 'hold')
-            ->latest('id');
-
-        if ($request->filled('start_date')) {
-            $query->whereDate('sale_date', '>=', $request->input('start_date'));
-        }
-
-        if ($request->filled('end_date')) {
-            $query->whereDate('sale_date', '<=', $request->input('end_date'));
-        }
-
-        if ($request->filled('customer_id')) {
-            $query->where('customer_id', $request->input('customer_id'));
-        }
-
-        if ($request->filled('invoice_id')) {
-            $query->where('invoice_id', 'like', '%' . $request->input('invoice_id') . '%');
-        }
-
-        $sales = $query->paginate(15);
-
-        return $this->successResponse($sales);
+            ->when($request->filled('start_date'), fn ($q) => $q->whereDate('sale_date', '>=', $request->input('start_date')))
+            ->when($request->filled('end_date'), fn ($q) => $q->whereDate('sale_date', '<=', $request->input('end_date')))
+            ->when($request->filled('customer_id'), fn ($q) => $q->where('customer_id', $request->input('customer_id')))
+            ->when($request->filled('invoice_id'), fn ($q) => $q->where('invoice_id', 'like', '%'.$request->input('invoice_id').'%'))
+            ->latest('id')->paginate(15));
     }
 
-    /**
-     * Get list of held sales.
-     */
     public function getHeldSales(): JsonResponse
     {
-        $held = Sale::with(['items', 'customer', 'supplier', 'marketer'])
-            ->where('status', 'hold')
-            ->latest('id')
-            ->get();
-
-        return $this->successResponse($held);
+        return $this->successResponse(Sale::with(['items', 'customer', 'supplier', 'marketer', 'outlet'])->where('status', 'hold')->latest('id')->get());
     }
 
-    /**
-     * Resume / Delete a held sale when restored to active cart.
-     */
     public function resumeSale(int $id): JsonResponse
     {
-        $sale = Sale::with(['items'])->where('status', 'hold')->findOrFail($id);
-        $sale->delete(); // Remove from hold list so it can be re-submitted or modified
+        // DELETE is discard only. Resuming is read-only until an atomic checkout/re-hold.
+        DB::transaction(fn () => Sale::where('status', 'hold')->lockForUpdate()->findOrFail($id)->delete());
 
-        return $this->successResponse($sale, 'Held sale resumed to cart.');
+        return $this->successResponse(null, 'Held sale discarded.');
     }
 
-    /**
-     * Store customer due collection.
-     */
     public function storeCollection(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'customer_id' => 'required|exists:customers,id',
-            'collection_date' => 'required|date',
-            'payment_method' => 'required|string',
-            'account' => 'required|string',
-            'receivable_due' => 'required|numeric|min:0',
-            'discount_amount' => 'numeric|min:0',
-            'paid_amount' => 'required|numeric|min:0.01',
-            'send_sms' => 'boolean',
+        $data = $request->validate([
+            'customer_id' => 'required|exists:customers,id', 'collection_date' => 'required|date',
+            'payment_method' => 'required|string', 'account' => 'required|string|exists:financial_accounts,name',
+            'receivable_due' => 'required|numeric|min:0', 'discount_amount' => 'numeric|min:0',
+            'paid_amount' => 'required|numeric|min:0.01', 'send_sms' => 'boolean',
         ]);
-
-        $user = $this->getAuthenticatedUser($request);
-
-        $collection = DB::transaction(function () use ($validated, $user) {
-            $number = 'COL-' . date('Ymd') . '-' . str_pad((string) (CustomerCollection::count() + 1), 4, '0', STR_PAD_LEFT);
-
-            $record = CustomerCollection::create([
-                'collection_number' => $number,
-                'customer_id' => $validated['customer_id'],
-                'user_id' => $user->id,
-                'collection_date' => $validated['collection_date'],
-                'payment_method' => $validated['payment_method'],
-                'account' => $validated['account'],
-                'receivable_due' => $validated['receivable_due'],
-                'discount_amount' => $validated['discount_amount'] ?? 0,
-                'paid_amount' => $validated['paid_amount'],
-                'send_sms' => (bool) ($validated['send_sms'] ?? true),
-            ]);
-
-            // Deduct due from customer
-            $customer = Customer::lockForUpdate()->find($validated['customer_id']);
-            $totalRelief = (float) $validated['paid_amount'] + (float) ($validated['discount_amount'] ?? 0);
-            $newDue = max(0.0, (float) $customer->previous_due - $totalRelief);
-            $customer->update(['previous_due' => $newDue]);
-
-            // Deposit to financial account
-            $account = FinancialAccount::where('name', $validated['account'])->first();
-            if ($account) {
-                $account->increment('balance', (float) $validated['paid_amount']);
+        $record = DB::transaction(function () use ($data, $request) {
+            $customer = Customer::lockForUpdate()->findOrFail($data['customer_id']);
+            $paid = round((float) $data['paid_amount'], 2);
+            $discount = round((float) ($data['discount_amount'] ?? 0), 2);
+            if ($paid + $discount > (float) $customer->previous_due) {
+                throw ValidationException::withMessages(['paid_amount' => 'Payment plus discount exceeds the current customer due.']);
             }
+            $record = CustomerCollection::create(array_merge($data, [
+                'collection_number' => PosRules::number('COL'), 'user_id' => $request->user()->id,
+                'receivable_due' => $customer->previous_due, 'paid_amount' => $paid,
+                'discount_amount' => $discount, 'send_sms' => false,
+            ]));
+            $customer->decrement('previous_due', $paid + $discount);
+            FinancialAccount::where('name', $data['account'])->lockForUpdate()->firstOrFail()->increment('balance', $paid);
 
             return $record;
         });
 
-        $collection->load(['customer', 'user']);
-
-        return $this->successResponse($collection, 'Due collection recorded successfully.', Response::HTTP_CREATED);
+        return $this->successResponse($record->load(['customer', 'user']), 'Collection recorded.', 201);
     }
 
-    /**
-     * Get collections history.
-     */
     public function getCollections(): JsonResponse
     {
-        $collections = CustomerCollection::with(['customer', 'user'])->latest('id')->paginate(15);
-        return $this->successResponse($collections);
+        return $this->successResponse(CustomerCollection::with(['customer', 'user'])->latest('id')->paginate(15));
     }
 
-    /**
-     * Dashboard statistics matching Image 5.
-     */
     public function dashboard(): JsonResponse
     {
+        $today = now()->toDateString();
+        $yesterday = now()->subDay()->toDateString();
+        $start = now()->startOfMonth()->toDateString();
+        $period = function (string $from, string $to): array {
+            return [
+                'sale' => round((float) Sale::where('status', 'completed')->whereDate('sale_date', '>=', $from)->whereDate('sale_date', '<=', $to)->sum(DB::raw(PosRules::revenue())), 2),
+                'purchase' => round((float) Purchase::whereBetween('purchase_date', [$from, $to])->sum('total_payable'), 2),
+            ];
+        };
+        $cash = function (string $from, string $to): array {
+            return [
+                'income' => round((float) Sale::where('status', 'completed')->whereDate('sale_date', '>=', $from)->whereDate('sale_date', '<=', $to)->sum('paid_amount')
+                    + (float) CustomerCollection::whereBetween('collection_date', [$from, $to])->sum('paid_amount'), 2),
+                'expense' => round((float) GeneralExpense::whereBetween('expense_date', [$from, $to])->sum('amount'), 2),
+            ];
+        };
         $accounts = FinancialAccount::all();
-        $totalAvailable = $accounts->sum('balance');
-
-        $receivableDue = Customer::sum('previous_due');
-        $payableDue = 6940202.30; // Supplier payable due summary
-
-        $todaySales = Sale::whereDate('sale_date', now()->toDateString())->where('status', 'completed')->sum('payable_amount');
-        if ($todaySales == 0) {
-            $todaySales = 154644.20; // Default demonstration benchmark
-        }
-
-        $yesterdaySales = 319497.44;
-        $monthlySales = 1368162.47;
-        $monthlyIncome = 51662.13;
-        $monthlyExpense = 33280.00;
 
         return $this->successResponse([
             'metrics' => [
-                'today' => ['sale' => $todaySales, 'purchase' => 0.00],
-                'yesterday' => ['sale' => $yesterdaySales, 'purchase' => 0.00],
-                'monthly' => ['sale' => $monthlySales, 'purchase' => 3978.00],
-                'today_ga' => ['income' => 4486.14, 'expense' => 0.00],
-                'monthly_ga' => ['income' => $monthlyIncome, 'expense' => $monthlyExpense],
-                'liabilities' => ['payable_due' => $payableDue, 'receivable_due' => $receivableDue],
-                'sms_info' => ['balance' => 2388.08, 'credit_limit' => 0.00],
-                'available_amount' => $totalAvailable,
+                'today' => $period($today, $today), 'yesterday' => $period($yesterday, $yesterday), 'monthly' => $period($start, $today),
+                'today_ga' => $cash($today, $today), 'monthly_ga' => $cash($start, $today),
+                'liabilities' => ['payable_due' => Supplier::all()->sum(fn ($s) => PosRules::supplierDue($s->id)), 'receivable_due' => (float) Customer::sum('previous_due')],
+                'available_amount' => (float) $accounts->sum('balance'),
             ],
             'accounts' => $accounts,
-            'recent_sales' => Sale::with(['customer', 'supplier'])->latest('id')->limit(8)->get(),
+            'recent_sales' => Sale::with(['customer', 'outlet'])->where('status', 'completed')->latest('id')->limit(8)->get(),
+            'stock' => [
+                'products' => Product::where('is_active', true)->count(),
+                'low' => Product::where('is_active', true)->whereColumn('available_qty', '<=', 'low_stock_threshold')->count(),
+                'out' => Product::where('is_active', true)->where('available_qty', '<=', 0)->count(),
+            ],
+            'sales_trend' => collect(range(6, 0))->map(function ($offset) use ($period) {
+                $day = now()->subDays($offset)->toDateString();
+
+                return ['date' => $day, 'sale' => $period($day, $day)['sale']];
+            }),
         ]);
     }
 }

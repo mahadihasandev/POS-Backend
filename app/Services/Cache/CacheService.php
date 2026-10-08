@@ -33,7 +33,7 @@ class CacheService implements CacheServiceInterface
     {
         $base = $this->store ?? Cache::store();
 
-        if (!empty($this->activeTags) && method_exists($base, 'tags')) {
+        if (! empty($this->activeTags) && $base->supportsTags()) {
             return $base->tags($this->activeTags);
         }
 
@@ -50,7 +50,7 @@ class CacheService implements CacheServiceInterface
         }
 
         // L2 Check / Populate
-        $value = $this->getStore()->remember($key, $ttl, $callback);
+        $value = $this->getStore()->remember($this->storageKey($key), $ttl, $callback);
         $this->memoryCache[$fullKey] = $value;
 
         return $value;
@@ -64,7 +64,7 @@ class CacheService implements CacheServiceInterface
             return $this->memoryCache[$fullKey];
         }
 
-        $value = $this->getStore()->get($key, $default);
+        $value = $this->getStore()->get($this->storageKey($key), $default);
         if ($value !== $default) {
             $this->memoryCache[$fullKey] = $value;
         }
@@ -77,7 +77,7 @@ class CacheService implements CacheServiceInterface
         $fullKey = $this->resolveKey($key);
         $this->memoryCache[$fullKey] = $value;
 
-        return (bool) $this->getStore()->put($key, $value, $ttl);
+        return (bool) $this->getStore()->put($this->storageKey($key), $value, $ttl);
     }
 
     public function has(string $key): bool
@@ -88,7 +88,7 @@ class CacheService implements CacheServiceInterface
             return true;
         }
 
-        return $this->getStore()->has($key);
+        return $this->getStore()->has($this->storageKey($key));
     }
 
     public function forget(string $key): bool
@@ -96,7 +96,7 @@ class CacheService implements CacheServiceInterface
         $fullKey = $this->resolveKey($key);
         unset($this->memoryCache[$fullKey]);
 
-        return (bool) $this->getStore()->forget($key);
+        return (bool) $this->getStore()->forget($this->storageKey($key));
     }
 
     public function tags(array|string $tags): static
@@ -121,10 +121,17 @@ class CacheService implements CacheServiceInterface
         return $lock->get($callback);
     }
 
+    private function storageKey(string $key): string
+    {
+        $base = $this->store ?? Cache::store();
+
+        return ! empty($this->activeTags) && ! $base->supportsTags() ? $this->resolveKey($key) : $key;
+    }
+
     private function resolveKey(string $key): string
     {
-        if (!empty($this->activeTags)) {
-            return implode(':', $this->activeTags) . ':' . $key;
+        if (! empty($this->activeTags)) {
+            return implode(':', $this->activeTags).':'.$key;
         }
 
         return $key;

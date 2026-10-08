@@ -14,17 +14,22 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Str;
-use RuntimeException;
 use UnexpectedValueException;
 
 class JwtTokenService implements TokenServiceInterface
 {
     private string $secret;
+
     private string $algo;
+
     private int $accessTtlMinutes;
+
     private int $refreshTtlMinutes;
+
     private string $issuer;
+
     private string $audience;
+
     private string $blacklistPrefix;
 
     public function __construct(
@@ -55,7 +60,11 @@ class JwtTokenService implements TokenServiceInterface
             $decoded = JWT::decode($token, new Key($this->secret, $this->algo));
             $claims = (array) $decoded;
         } catch (\Throwable $e) {
-            throw new UnexpectedValueException('Invalid or malformed token: ' . $e->getMessage(), 0, $e);
+            throw new UnexpectedValueException('Invalid or malformed token: '.$e->getMessage(), 0, $e);
+        }
+
+        if (($claims['iss'] ?? null) !== $this->issuer || ($claims['aud'] ?? null) !== $this->audience || ! in_array($claims['type'] ?? null, ['access', 'refresh'], true)) {
+            throw new UnexpectedValueException('Token issuer, audience or type is invalid.');
         }
 
         $jti = (string) ($claims['jti'] ?? '');
@@ -79,11 +88,11 @@ class JwtTokenService implements TokenServiceInterface
 
         try {
             $decrypted = $this->encryptionService->decrypt($encryptedPayload);
-            if (!is_array($decrypted)) {
+            if (! is_array($decrypted)) {
                 throw new UnexpectedValueException('Invalid decrypted token payload.');
             }
         } catch (\Throwable $e) {
-            throw new UnexpectedValueException('Failed to decrypt token claims: ' . $e->getMessage(), 0, $e);
+            throw new UnexpectedValueException('Failed to decrypt token claims: '.$e->getMessage(), 0, $e);
         }
 
         return new TokenPayloadDTO(
@@ -109,7 +118,7 @@ class JwtTokenService implements TokenServiceInterface
             }
 
             $remainingSeconds = max($exp - time(), 60);
-            Cache::put($this->blacklistPrefix . $jti, true, Carbon::now()->addSeconds($remainingSeconds));
+            Cache::put($this->blacklistPrefix.$jti, true, Carbon::now()->addSeconds($remainingSeconds));
 
             return true;
         } catch (\Throwable) {
@@ -119,7 +128,7 @@ class JwtTokenService implements TokenServiceInterface
 
     public function isTokenRevoked(string $jti): bool
     {
-        return Cache::has($this->blacklistPrefix . $jti);
+        return Cache::has($this->blacklistPrefix.$jti);
     }
 
     private function createToken(User $user, string $type, int $ttlMinutes, array $customClaims = []): string

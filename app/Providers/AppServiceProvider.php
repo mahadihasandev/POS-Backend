@@ -31,7 +31,7 @@ class AppServiceProvider extends ServiceProvider
         // Core Security, Token, and High-Performance Cache Services (Singletons for peak speed)
         $this->app->singleton(EncryptionServiceInterface::class, EncryptionService::class);
         $this->app->singleton(TokenServiceInterface::class, JwtTokenService::class);
-        $this->app->singleton(CacheServiceInterface::class, CacheService::class);
+        $this->app->scoped(CacheServiceInterface::class, CacheService::class);
 
         // Repositories
         $this->app->bind(UserRepositoryInterface::class, UserRepository::class);
