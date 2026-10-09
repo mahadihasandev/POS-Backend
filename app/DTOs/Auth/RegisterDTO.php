@@ -13,7 +13,8 @@ final readonly class RegisterDTO
         public string $email,
         public string $password,
         public ?string $ipAddress = null,
-        public ?string $userAgent = null
+        public ?string $userAgent = null,
+        public ?int $designationId = null
     ) {}
 
     public static function fromRequest(Request $request): self
@@ -23,7 +24,8 @@ final readonly class RegisterDTO
             email: strtolower(trim((string) $request->validated('email'))),
             password: (string) $request->validated('password'),
             ipAddress: $request->ip(),
-            userAgent: $request->userAgent()
+            userAgent: $request->userAgent(),
+            designationId: $request->validated('designation_id') !== null ? (int) $request->validated('designation_id') : null
         );
     }
 }

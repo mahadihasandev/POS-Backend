@@ -9,6 +9,8 @@ use App\Models\Permission;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class DesignationController extends BaseApiController
 {
@@ -18,6 +20,7 @@ class DesignationController extends BaseApiController
     public function index(): JsonResponse
     {
         $designations = Designation::with(['permissions'])->withCount('users')->get();
+
         return $this->successResponse($designations);
     }
 
@@ -40,7 +43,7 @@ class DesignationController extends BaseApiController
             'description' => $validated['description'] ?? null,
         ]);
 
-        if (!empty($validated['permission_ids'])) {
+        if (! empty($validated['permission_ids'])) {
             $designation->permissions()->sync($validated['permission_ids']);
         }
 
@@ -58,7 +61,7 @@ class DesignationController extends BaseApiController
         $designation = Designation::findOrFail($id);
 
         $validated = $request->validate([
-            'permission_ids' => 'required|array',
+            'permission_ids' => 'present|array',
             'permission_ids.*' => 'exists:permissions,id',
         ]);
 
@@ -77,6 +80,7 @@ class DesignationController extends BaseApiController
     public function getAllPermissions(): JsonResponse
     {
         $permissions = Permission::all()->groupBy('module');
+
         return $this->successResponse($permissions);
     }
 
@@ -86,6 +90,7 @@ class DesignationController extends BaseApiController
     public function getUsers(): JsonResponse
     {
         $users = User::with(['designation.permissions'])->select('id', 'name', 'email', 'designation_id', 'created_at')->get();
+
         return $this->successResponse($users);
     }
 
@@ -100,7 +105,20 @@ class DesignationController extends BaseApiController
             'designation_id' => 'required|exists:designations,id',
         ]);
 
-        $user->update(['designation_id' => $validated['designation_id']]);
+        DB::transaction(function () use ($user, $validated): void {
+            // Serialize role changes so two requests cannot remove the final
+            // administrators at the same time.
+            $adminRole = Designation::where('slug', 'admin')->lockForUpdate()->first();
+            $user->refresh();
+            if ($adminRole && $user->designation_id === $adminRole->id
+                && (int) $validated['designation_id'] !== $adminRole->id
+                && User::where('designation_id', $adminRole->id)->count() <= 1) {
+                throw ValidationException::withMessages([
+                    'designation_id' => ['Keep at least one administrator. Assign another administrator before changing this role.'],
+                ]);
+            }
+            $user->update(['designation_id' => $validated['designation_id']]);
+        });
         $user->load(['designation.permissions']);
 
         return $this->successResponse($user, "Designation assigned to user '{$user->name}' successfully.");

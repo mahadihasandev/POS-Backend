@@ -20,6 +20,7 @@ class RegisterRequest extends FormRequest
     public function rules(): array
     {
         return [
+            'designation_id' => ['nullable', 'integer', 'exists:designations,id'],
             'name' => ['required', 'string', 'max:120'],
             'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
             'password' => [

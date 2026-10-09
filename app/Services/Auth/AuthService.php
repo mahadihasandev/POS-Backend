@@ -13,6 +13,7 @@ use App\Models\User;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 
@@ -31,14 +32,19 @@ class AuthService implements AuthServiceInterface
             ]);
         }
 
-        /** @var User $user */
-        $user = $this->userRepository->create([
-            'name' => $dto->name,
-            'email' => $dto->email,
-            'password' => Hash::make($dto->password),
-        ]);
+        // Persist the staff account and its role together; a failed registration
+        // must not leave an account behind that cannot be retried.
+        return DB::transaction(function () use ($dto): array {
+            /** @var User $user */
+            $user = $this->userRepository->create([
+                'name' => $dto->name,
+                'email' => $dto->email,
+                'password' => Hash::make($dto->password),
+                'designation_id' => $dto->designationId,
+            ]);
 
-        return $this->generateAuthPayload($user);
+            return $this->generateAuthPayload($user);
+        });
     }
 
     public function login(LoginDTO $dto): array
