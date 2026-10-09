@@ -60,19 +60,18 @@ foreach (['packages.php', 'services.php'] as $cacheFile) {
 $_SERVER['SCRIPT_NAME'] = '/index.php';
 $_SERVER['PHP_SELF'] = '/index.php';
 
-// Universal CORS preflight interceptor & response headers
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
-if ($origin !== '*') {
-    header("Access-Control-Allow-Origin: {$origin}");
-    header('Access-Control-Allow-Credentials: true');
-} else {
-    header('Access-Control-Allow-Origin: *');
-}
-header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-Response-Time');
-header('Access-Control-Max-Age: 86400');
-
+// Universal CORS preflight interceptor
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
+    if ($origin !== '*') {
+        header("Access-Control-Allow-Origin: {$origin}");
+        header('Access-Control-Allow-Credentials: true');
+    } else {
+        header('Access-Control-Allow-Origin: *');
+    }
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-Response-Time');
+    header('Access-Control-Max-Age: 86400');
     http_response_code(204);
     exit;
 }
