@@ -63,12 +63,19 @@ try {
     error_log('[VERCEL_BOOT_ERROR] ' . $e->getMessage() . "\n" . $e->getTraceAsString());
     http_response_code(500);
     header('Content-Type: application/json');
+    $prev = $e->getPrevious();
     echo json_encode([
         'success' => false,
         'message' => 'Backend initialization error: ' . $e->getMessage(),
         'error_code' => 'ERR_VERCEL_BOOT_FAILED',
         'file' => $e->getFile(),
         'line' => $e->getLine(),
-        'trace' => array_slice(explode("\n", $e->getTraceAsString()), 0, 10),
+        'previous' => $prev ? [
+            'message' => $prev->getMessage(),
+            'file' => $prev->getFile(),
+            'line' => $prev->getLine(),
+            'trace' => array_slice(explode("\n", $prev->getTraceAsString()), 0, 10),
+        ] : null,
+        'trace' => array_slice(explode("\n", $e->getTraceAsString()), 0, 15),
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 }

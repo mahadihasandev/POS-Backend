@@ -125,4 +125,22 @@ if ($customStoragePath) {
     $app->useStoragePath($customStoragePath);
 }
 
+// Fallback 'view' binding to prevent RegisterErrorViewPaths crash in serverless/early exception handler
+if (!$app->bound('view')) {
+    $app->singleton('view', function () {
+        return new class {
+            public function replaceNamespace($namespace, $hints) { return $this; }
+            public function addNamespace($namespace, $hints) { return $this; }
+            public function exists($view) { return false; }
+            public function make($view, $data = [], $mergeData = []) {
+                return new class {
+                    public function render() { return ''; }
+                    public function with($key, $value = null) { return $this; }
+                };
+            }
+            public function share($key, $value = null) {}
+        };
+    });
+}
+
 return $app;
