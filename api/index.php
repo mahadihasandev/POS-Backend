@@ -30,11 +30,13 @@ foreach ($directories as $dir) {
     }
 }
 
-// Redirect cache and compiled views to /tmp
+// Redirect all Laravel cache and compiled views to writable /tmp
 $cacheMappings = [
     'APP_CONFIG_CACHE' => '/tmp/bootstrap/cache/config.php',
     'APP_EVENTS_CACHE' => '/tmp/bootstrap/cache/events.php',
+    'APP_PACKAGES_CACHE' => '/tmp/bootstrap/cache/packages.php',
     'APP_ROUTES_CACHE' => '/tmp/bootstrap/cache/routes.php',
+    'APP_SERVICES_CACHE' => '/tmp/bootstrap/cache/services.php',
     'VIEW_COMPILED_PATH' => $storagePath . '/framework/views',
 ];
 
@@ -42,6 +44,15 @@ foreach ($cacheMappings as $key => $val) {
     if (!getenv($key) && !isset($_ENV[$key])) {
         putenv("{$key}={$val}");
         $_ENV[$key] = $val;
+    }
+}
+
+// Seed packages and services cache from build if available
+foreach (['packages.php', 'services.php'] as $cacheFile) {
+    $src = __DIR__ . '/../bootstrap/cache/' . $cacheFile;
+    $dest = '/tmp/bootstrap/cache/' . $cacheFile;
+    if (file_exists($src) && !file_exists($dest)) {
+        @copy($src, $dest);
     }
 }
 

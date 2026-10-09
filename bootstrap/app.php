@@ -52,96 +52,70 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        // Enforce JSON responses for all /api/* routes or requests expecting JSON
+        // Enforce JSON responses for ALL routes in this headless API backend
         $exceptions->shouldRenderJsonWhen(
-            fn (Request $request) => $request->is('api/*') || $request->expectsJson()
+            fn (Request $request) => true
         );
 
         // Validation Exceptions
-        $exceptions->render(function (ValidationException $e, Request $request): ?JsonResponse {
-            if ($request->is('api/*') || $request->expectsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'The given data was invalid.',
-                    'error_code' => 'ERR_VALIDATION_FAILED',
-                    'errors' => $e->errors(),
-                ], Response::HTTP_UNPROCESSABLE_ENTITY);
-            }
-
-            return null;
+        $exceptions->render(function (ValidationException $e, Request $request): JsonResponse {
+            return response()->json([
+                'success' => false,
+                'message' => 'The given data was invalid.',
+                'error_code' => 'ERR_VALIDATION_FAILED',
+                'errors' => $e->errors(),
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
         });
 
         // Authentication Exceptions
-        $exceptions->render(function (AuthenticationException $e, Request $request): ?JsonResponse {
-            if ($request->is('api/*') || $request->expectsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => $e->getMessage() ?: 'Unauthenticated.',
-                    'error_code' => 'ERR_UNAUTHENTICATED',
-                ], Response::HTTP_UNAUTHORIZED);
-            }
-
-            return null;
+        $exceptions->render(function (AuthenticationException $e, Request $request): JsonResponse {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage() ?: 'Unauthenticated.',
+                'error_code' => 'ERR_UNAUTHENTICATED',
+            ], Response::HTTP_UNAUTHORIZED);
         });
 
         // Model / Route Not Found
-        $exceptions->render(function (ModelNotFoundException|NotFoundHttpException $e, Request $request): ?JsonResponse {
-            if ($request->is('api/*') || $request->expectsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'The requested resource was not found.',
-                    'error_code' => 'ERR_NOT_FOUND',
-                ], Response::HTTP_NOT_FOUND);
-            }
-
-            return null;
+        $exceptions->render(function (ModelNotFoundException|NotFoundHttpException $e, Request $request): JsonResponse {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage() ?: 'The requested resource was not found.',
+                'error_code' => 'ERR_NOT_FOUND',
+            ], Response::HTTP_NOT_FOUND);
         });
 
         // Authorization / Access Denied
-        $exceptions->render(function (AuthorizationException|AccessDeniedHttpException $e, Request $request): ?JsonResponse {
-            if ($request->is('api/*') || $request->expectsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'This action is unauthorized.',
-                    'error_code' => 'ERR_FORBIDDEN',
-                ], Response::HTTP_FORBIDDEN);
-            }
-
-            return null;
+        $exceptions->render(function (AuthorizationException|AccessDeniedHttpException $e, Request $request): JsonResponse {
+            return response()->json([
+                'success' => false,
+                'message' => 'This action is unauthorized.',
+                'error_code' => 'ERR_FORBIDDEN',
+            ], Response::HTTP_FORBIDDEN);
         });
 
         // Rate Limiting (Throttle)
-        $exceptions->render(function (TooManyRequestsHttpException $e, Request $request): ?JsonResponse {
-            if ($request->is('api/*') || $request->expectsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Too many requests. Please slow down.',
-                    'error_code' => 'ERR_RATE_LIMIT_EXCEEDED',
-                ], Response::HTTP_TOO_MANY_REQUESTS);
-            }
-
-            return null;
+        $exceptions->render(function (TooManyRequestsHttpException $e, Request $request): JsonResponse {
+            return response()->json([
+                'success' => false,
+                'message' => 'Too many requests. Please slow down.',
+                'error_code' => 'ERR_RATE_LIMIT_EXCEEDED',
+            ], Response::HTTP_TOO_MANY_REQUESTS);
         });
 
         // General / Fallback Exceptions
-        $exceptions->render(function (Throwable $e, Request $request): ?JsonResponse {
-            if ($request->is('api/*') || $request->expectsJson()) {
-                $statusCode = method_exists($e, 'getStatusCode') ? $e->getStatusCode() : Response::HTTP_INTERNAL_SERVER_ERROR;
-                $isDebug = (bool) config('app.debug');
+        $exceptions->render(function (Throwable $e, Request $request): JsonResponse {
+            $statusCode = method_exists($e, 'getStatusCode') ? $e->getStatusCode() : Response::HTTP_INTERNAL_SERVER_ERROR;
+            $isDebug = (bool) config('app.debug');
 
-                return response()->json([
-                    'success' => false,
-                    'message' => $isDebug ? $e->getMessage() : 'An unexpected server error occurred.',
-                    'error_code' => 'ERR_SERVER_ERROR',
-                    'debug' => $isDebug ? [
-                        'exception' => get_class($e),
-                        'file' => $e->getFile(),
-                        'line' => $e->getLine(),
-                    ] : null,
-                ], $statusCode >= 400 && $statusCode < 600 ? $statusCode : Response::HTTP_INTERNAL_SERVER_ERROR);
-            }
-
-            return null;
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage() ?: 'An unexpected server error occurred.',
+                'error_code' => 'ERR_SERVER_ERROR',
+                'exception' => get_class($e),
+                'file' => $isDebug ? $e->getFile() : null,
+                'line' => $isDebug ? $e->getLine() : null,
+            ], $statusCode >= 400 && $statusCode < 600 ? $statusCode : Response::HTTP_INTERNAL_SERVER_ERROR);
         });
     })->create();
 
