@@ -56,6 +56,10 @@ foreach (['packages.php', 'services.php'] as $cacheFile) {
     }
 }
 
+// Normalize SCRIPT_NAME and PHP_SELF so Symfony does not treat /api as a base subdirectory
+$_SERVER['SCRIPT_NAME'] = '/index.php';
+$_SERVER['PHP_SELF'] = '/index.php';
+
 // Delegate to Laravel public front controller with diagnostic error trapping
 try {
     require __DIR__ . '/../public/index.php';
