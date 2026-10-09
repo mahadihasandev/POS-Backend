@@ -36,7 +36,8 @@ This guide walks you through deploying the Laravel 13 backend to Vercel Serverle
    - Go to [vercel.com/new](https://vercel.com/new).
    - Select your repository (`POS-Backend`).
    - If the repository has a subfolder, set **Root Directory** to `backend` (or leave as `./` if the repo contains only the backend).
-   - Set **Framework Preset** to **Other**.
+   - Set **Framework Preset** to **Other** (or ensure **Output Directory** is set to `public`).
+   - If **Framework Preset** was previously set to Vite, go to **Settings -> Build & Development Settings** and set **Output Directory** to `public` (or enable Override: `public`).
 
 3. **Configure Environment Variables**:
    Copy the variables from [`.env.vercel.example`](file:///c:/Users/arnob/Music/drive%20app/backend/.env.vercel.example) into **Environment Variables**:

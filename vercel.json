@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "framework": null,
+  "outputDirectory": "public",
   "regions": [
     "sin1"
   ],
@@ -11,14 +11,10 @@
       "maxDuration": 30
     }
   },
-  "routes": [
+  "rewrites": [
     {
-      "src": "/(build|favicon.ico|robots.txt)(.*)",
-      "dest": "/public/$1$2"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/api/index.php"
+      "source": "/(.*)",
+      "destination": "/api/index.php"
     }
   ],
   "env": {
