@@ -60,6 +60,48 @@ foreach (['packages.php', 'services.php'] as $cacheFile) {
 $_SERVER['SCRIPT_NAME'] = '/index.php';
 $_SERVER['PHP_SELF'] = '/index.php';
 
+// Universal CORS preflight interceptor & response headers
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
+if ($origin !== '*') {
+    header("Access-Control-Allow-Origin: {$origin}");
+    header('Access-Control-Allow-Credentials: true');
+} else {
+    header('Access-Control-Allow-Origin: *');
+}
+header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-Response-Time');
+header('Access-Control-Max-Age: 86400');
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
+
+// Normalize URI: Handle requests missing /api or /api/v1 prefix gracefully
+$requestUri = $_SERVER['REQUEST_URI'] ?? '/';
+$requestPath = parse_url($requestUri, PHP_URL_PATH) ?: '/';
+$requestQuery = parse_url($requestUri, PHP_URL_QUERY);
+$queryString = $requestQuery !== null && $requestQuery !== '' ? '?' . $requestQuery : '';
+
+if ($requestPath === '/favicon.ico') {
+    http_response_code(204);
+    exit;
+}
+
+if (!str_starts_with($requestPath, '/api/')) {
+    if (str_starts_with($requestPath, '/v1/')) {
+        $_SERVER['REQUEST_URI'] = '/api' . $requestPath . $queryString;
+    } elseif (
+        str_starts_with($requestPath, '/auth/') ||
+        str_starts_with($requestPath, '/pos/') ||
+        str_starts_with($requestPath, '/rbac/') ||
+        str_starts_with($requestPath, '/drive/') ||
+        $requestPath === '/health'
+    ) {
+        $_SERVER['REQUEST_URI'] = '/api/v1' . $requestPath . $queryString;
+    }
+}
+
 // Delegate to Laravel public front controller with diagnostic error trapping
 try {
     require __DIR__ . '/../public/index.php';
