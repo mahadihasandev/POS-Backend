@@ -144,3 +144,11 @@ return Application::configure(basePath: dirname(__DIR__))
             return null;
         });
     })->create();
+
+// Dynamic storage path for serverless / Vercel execution (writable /tmp filesystem)
+$customStoragePath = env('APP_STORAGE') ?: ((isset($_ENV['VERCEL']) || getenv('VERCEL')) ? '/tmp/storage' : null);
+if ($customStoragePath) {
+    $app->useStoragePath($customStoragePath);
+}
+
+return $app;

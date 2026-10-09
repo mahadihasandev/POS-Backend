@@ -1,0 +1,16 @@
+/vendor
+.env
+.env.*
+node_modules
+.git
+.github
+tests
+Dockerfile
+docker
+render.yaml
+phpunit.xml
+.phpunit.result.cache
+storage/logs/*.log
+storage/framework/cache/data/*
+storage/framework/sessions/*
+storage/framework/views/*

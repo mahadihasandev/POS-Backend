@@ -74,7 +74,7 @@ class DriveService implements DriveServiceInterface
 
         $checksum = $this->encryptionService->hash($rawContent);
         $uuid = (string) Str::uuid();
-        $storageDisk = Storage::disk('local');
+        $storageDisk = Storage::disk(config('filesystems.default', 'local'));
         $relativeDir = "drive/{$user->id}";
 
         if ($dto->encryptAtRest) {
@@ -133,7 +133,7 @@ class DriveService implements DriveServiceInterface
             throw new UnexpectedValueException('Folders cannot be downloaded directly.');
         }
 
-        $disk = Storage::disk('local');
+        $disk = Storage::disk(config('filesystems.default', 'local'));
         if (!$disk->exists((string) $item->storage_path)) {
             throw new ModelNotFoundException('Physical file not found in storage.');
         }
@@ -189,7 +189,7 @@ class DriveService implements DriveServiceInterface
         $item = $this->getItem($user, $uuid);
 
         if ($item->isFile() && !empty($item->storage_path)) {
-            Storage::disk('local')->delete((string) $item->storage_path);
+            Storage::disk(config('filesystems.default', 'local'))->delete((string) $item->storage_path);
         }
 
         return $this->driveItemRepository->delete($item);
