@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "outputDirectory": "public",
+  "framework": null,
   "regions": [
     "sin1"
   ],
@@ -11,10 +11,14 @@
       "maxDuration": 30
     }
   },
-  "rewrites": [
+  "routes": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index.php"
+      "src": "/build/(.*)",
+      "dest": "/public/build/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.php"
     }
   ],
   "env": {
