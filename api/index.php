@@ -58,5 +58,6 @@ try {
         'error_code' => 'ERR_VERCEL_BOOT_FAILED',
         'file' => $e->getFile(),
         'line' => $e->getLine(),
-    ]);
+        'trace' => array_slice(explode("\n", $e->getTraceAsString()), 0, 10),
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 }
