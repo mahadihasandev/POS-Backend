@@ -30,6 +30,9 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // Trust Render & Reverse Proxy headers (HTTPS termination)
+        $middleware->trustProxies(at: '*');
+
         // Global and API Security + Performance Pipeline
         $middleware->api(prepend: [
             EnforceTlsAndSecurityHeaders::class,
