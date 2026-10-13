@@ -36,6 +36,7 @@ Route::prefix('v1')->group(function (): void {
         Route::prefix('auth')->group(function (): void {
             Route::get('/me', [AuthController::class, 'me'])->name('api.v1.auth.me');
             Route::post('/logout', [AuthController::class, 'logout'])->name('api.v1.auth.logout');
+            Route::post('/register/request-code', [AuthController::class, 'requestRegistrationCode'])->middleware(['permission:users.manage', 'throttle:10,1'])->name('api.v1.auth.register.code');
             Route::post('/register', [AuthController::class, 'register'])->middleware('permission:users.manage')->name('api.v1.auth.register');
         });
 

@@ -24,7 +24,7 @@ class AuthService implements AuthServiceInterface
         private readonly TokenServiceInterface $tokenService
     ) {}
 
-    public function register(RegisterDTO $dto): array
+    public function register(RegisterDTO $dto): User
     {
         if ($this->userRepository->emailExists($dto->email)) {
             throw ValidationException::withMessages([
@@ -34,7 +34,7 @@ class AuthService implements AuthServiceInterface
 
         // Persist the staff account and its role together; a failed registration
         // must not leave an account behind that cannot be retried.
-        return DB::transaction(function () use ($dto): array {
+        return DB::transaction(function () use ($dto): User {
             /** @var User $user */
             $user = $this->userRepository->create([
                 'name' => $dto->name,
@@ -43,7 +43,10 @@ class AuthService implements AuthServiceInterface
                 'designation_id' => $dto->designationId,
             ]);
 
-            return $this->generateAuthPayload($user);
+            $user->email_verified_at = now();
+            $user->save();
+
+            return $user;
         });
     }
 
