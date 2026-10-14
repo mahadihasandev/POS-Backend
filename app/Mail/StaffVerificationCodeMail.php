@@ -14,7 +14,7 @@ class StaffVerificationCodeMail extends Mailable
 
     public function envelope(): Envelope
     {
-        return new Envelope(subject: 'Your Smart Account staff verification code');
+        return new Envelope(subject: 'Your Prime Account staff verification code');
     }
 
     public function content(): Content

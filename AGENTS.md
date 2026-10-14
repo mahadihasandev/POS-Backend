@@ -1,4 +1,4 @@
-# Smart Account POS & Enterprise Backend Architecture Manual
+# Prime Account POS & Enterprise Backend Architecture Manual
 
 This document details the architectural standards, security primitives, caching strategies, and coding conventions implemented in this high-performance Laravel 13 REST API backend for the Point-of-Sale (POS), ERP, RBAC, and Cloud Drive system.
 

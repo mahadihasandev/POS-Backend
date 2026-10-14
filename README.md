@@ -1,4 +1,4 @@
-# Smart Account POS backend
+# Prime Account POS backend
 
 Laravel 13 API for the matching POS frontend. The committed lockfile uses Symfony 8, so deploy with PHP 8.4 or later, Composer 2, and SQLite or a production database supported by Laravel.
 
@@ -65,7 +65,7 @@ MAIL_SCHEME=smtp
 MAIL_USERNAME=arnob4all@gmail.com
 MAIL_PASSWORD="<Google App Password stored only in deployment secrets>"
 MAIL_FROM_ADDRESS=arnob4all@gmail.com
-MAIL_FROM_NAME="Smart Account POS"
+MAIL_FROM_NAME="Prime Account POS"
 ```
 
 For this Gmail account, enable 2-Step Verification and create a dedicated App Password in [Google Account settings](https://myaccount.google.com/apppasswords). Store it as `MAIL_PASSWORD` in the backend host's secret environment variables, never in chat or source control. This SMTP integration uses an App Password, not the ordinary Gmail sign-in password; see [Google's App Password instructions](https://support.google.com/accounts/answer/185833). Set all of the variables above on the backend host, remove any stale `MAIL_URL` override, and redeploy or refresh the configuration cache. Gmail uses STARTTLS on port 587 with `MAIL_SCHEME=smtp`, as documented in [Google's SMTP settings](https://support.google.com/mail/answer/7104828). The checked-in example keeps `MAIL_MAILER=log` until a real secret is supplied. No real delivery has been verified yet.
