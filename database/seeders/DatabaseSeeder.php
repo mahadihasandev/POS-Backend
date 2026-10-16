@@ -178,7 +178,7 @@ class DatabaseSeeder extends Seeder
         ]);
 
         $outlet2 = Outlet::updateOrCreate(['code' => 'OUT-02'], [
-            'name' => 'SMART ACCOUNT CENTRAL',
+            'name' => 'PRIME ACCOUNT CENTRAL',
             'address' => 'Motijheel C/A, Dhaka',
             'phone' => '+880 1811-000002',
         ]);
@@ -485,7 +485,7 @@ class DatabaseSeeder extends Seeder
         $trf1 = StockTransfer::firstOrCreate(['transfer_no' => 'TRF-20261003-001'], [
             'transfer_type' => 'warehouse',
             'source_name' => 'DATTA & BROTHERS ELECTRICS (Main Hub)',
-            'destination_name' => 'SMART ACCOUNT CENTRAL (Branch 2)',
+            'destination_name' => 'PRIME ACCOUNT CENTRAL (Branch 2)',
             'transfer_date' => '2026-10-03',
             'total_items' => 25,
             'status' => 'completed',

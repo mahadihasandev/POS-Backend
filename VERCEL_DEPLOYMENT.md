@@ -41,7 +41,7 @@ This guide walks you through deploying the Laravel 13 backend to Vercel Serverle
 
 3. **Configure Environment Variables**:
    Copy the variables from [`.env.vercel.example`](file:///c:/Users/arnob/Music/drive%20app/backend/.env.vercel.example) into **Environment Variables**:
-   - `APP_NAME` = `"Smart Account POS API"`
+   - `APP_NAME` = `"Prime Account POS API"`
    - `APP_ENV` = `production`
    - `APP_DEBUG` = `false`
    - `APP_KEY` = `base64:IqcGJdQPXFo2D9Dj5Gk1MDLERw7pXriU04YbDdOpwA4=`

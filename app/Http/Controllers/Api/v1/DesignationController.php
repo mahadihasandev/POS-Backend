@@ -89,7 +89,7 @@ class DesignationController extends BaseApiController
      */
     public function getUsers(): JsonResponse
     {
-        $users = User::with(['designation.permissions'])->select('id', 'name', 'email', 'designation_id', 'created_at')->get();
+        $users = User::with(['designation.permissions'])->select('id', 'name', 'email', 'email_verified_at', 'designation_id', 'created_at')->get();
 
         return $this->successResponse($users);
     }

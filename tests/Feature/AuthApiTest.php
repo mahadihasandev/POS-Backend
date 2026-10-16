@@ -5,80 +5,102 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Contracts\TokenServiceInterface;
+use App\Mail\StaffVerificationCodeMail;
 use App\Models\Designation;
 use App\Models\Permission;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Mail;
 use Tests\TestCase;
 
 class AuthApiTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_registration_requires_authenticated_user(): void
+    public function test_staff_account_is_created_only_after_the_email_code_is_entered(): void
     {
-        $payload = [
-            'name' => 'Alice Cooper',
-            'email' => 'alice@example.com',
-            'password' => 'SecurePass123!',
-        ];
+        Mail::fake();
+        $payload = ['name' => 'Alice Cooper', 'email' => 'alice@example.com', 'password' => 'SecurePass123!'];
+        $this->postJson('/api/v1/auth/register/request-code', ['email' => $payload['email']])->assertUnauthorized();
+        $this->postJson('/api/v1/auth/register', $payload)->assertUnauthorized();
 
-        // 1. Unauthenticated registration must be rejected with 401
-        $guestResponse = $this->postJson('/api/v1/auth/register', $payload);
-        $guestResponse->assertStatus(401);
+        $adminRole = Designation::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::factory()->create(['designation_id' => $adminRole->id]);
+        $this->withHeader('Authorization', 'Bearer '.app(TokenServiceInterface::class)->generateAccessToken($admin));
+        $this->postJson('/api/v1/auth/register', $payload)->assertUnprocessable()->assertJsonValidationErrors('verification_code');
+        $this->postJson('/api/v1/auth/register/request-code', ['email' => 'ALICE@example.com'])->assertOk();
+        $this->assertDatabaseMissing('users', ['email' => $payload['email']]);
+        Mail::assertSent(StaffVerificationCodeMail::class, 1);
+        $code = $this->sentCodeTo('alice@example.com');
+        $this->assertMatchesRegularExpression('/^[0-9]{6}$/', $code);
+        $this->assertStringContainsString($code, (new StaffVerificationCodeMail($code))->render());
 
-        // 2. Authenticated user can register a new user from inside the webapp
-        $role = Designation::create(['name' => 'Admin', 'slug' => 'admin']);
-        $admin = User::factory()->create(['designation_id' => $role->id]);
-        $tokenService = app(TokenServiceInterface::class);
-        $token = $tokenService->generateAccessToken($admin);
-
-        $authResponse = $this->withHeader('Authorization', "Bearer {$token}")
-            ->postJson('/api/v1/auth/register', $payload);
-
-        $authResponse->assertStatus(201)
-            ->assertJson([
-                'success' => true,
-                'message' => 'User registered and authenticated successfully.',
-            ])
-            ->assertJsonStructure([
-                'success',
-                'message',
-                'data' => [
-                    'user' => ['id', 'name', 'email'],
-                    'access_token',
-                    'refresh_token',
-                    'token_type',
-                    'expires_in',
-                ],
-            ]);
-
-        $this->assertDatabaseHas('users', ['email' => 'alice@example.com']);
+        $this->postJson('/api/v1/auth/register', $payload + ['verification_code' => $code])
+            ->assertCreated()
+            ->assertJsonPath('data.user.email', 'alice@example.com')
+            ->assertJsonPath('data.user.email_verified', true)
+            ->assertJsonMissingPath('data.access_token');
+        $this->assertNotNull(User::where('email', 'alice@example.com')->firstOrFail()->email_verified_at);
+        $this->getJson('/api/v1/rbac/users')->assertOk()->assertJsonPath('data.1.email_verified_at', User::where('email', 'alice@example.com')->firstOrFail()->email_verified_at->toJSON());
+        $this->getJson('/api/v1/auth/me')->assertOk()->assertJsonPath('data.id', $admin->id);
+        $this->postJson('/api/v1/auth/login', ['email' => 'alice@example.com', 'password' => 'SecurePass123!'])->assertOk();
     }
 
-    public function test_staff_registration_assigns_the_selected_role_in_one_request(): void
+    public function test_staff_registration_assigns_role_and_rejects_invalid_role_without_consuming_code(): void
     {
+        Mail::fake();
         $adminRole = Designation::create(['name' => 'Admin', 'slug' => 'admin']);
         $cashierRole = Designation::create(['name' => 'Cashier', 'slug' => 'cashier']);
         $admin = User::factory()->create(['designation_id' => $adminRole->id]);
         $this->withHeader('Authorization', 'Bearer '.app(TokenServiceInterface::class)->generateAccessToken($admin));
-        $payload = ['name' => 'New cashier', 'email' => 'cashier@example.com', 'password' => 'SecurePass123!', 'designation_id' => $cashierRole->id];
+        $payload = ['name' => 'New cashier', 'email' => 'cashier@example.com', 'password' => 'SecurePass123!', 'designation_id' => 99999];
+        $this->postJson('/api/v1/auth/register/request-code', ['email' => $payload['email']])->assertOk();
+        $payload['verification_code'] = $this->sentCodeTo($payload['email']);
+        $this->postJson('/api/v1/auth/register', $payload)->assertUnprocessable()->assertJsonValidationErrors('designation_id');
+        $this->assertDatabaseMissing('users', ['email' => 'cashier@example.com']);
+        $payload['designation_id'] = $cashierRole->id;
         $this->postJson('/api/v1/auth/register', $payload)->assertCreated()
             ->assertJsonPath('data.user.designation.id', $cashierRole->id);
         $this->assertDatabaseHas('users', ['email' => 'cashier@example.com', 'designation_id' => $cashierRole->id]);
-        $this->getJson('/api/v1/auth/me')->assertOk()->assertJsonPath('data.id', $admin->id);
     }
 
-    public function test_invalid_role_does_not_leave_a_partial_staff_account(): void
+    public function test_code_is_bound_to_requesting_admin_and_email_and_has_attempt_limit(): void
     {
+        Mail::fake();
+        $role = Designation::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::factory()->create(['designation_id' => $role->id]);
+        $otherAdmin = User::factory()->create(['designation_id' => $role->id]);
+        $tokenService = app(TokenServiceInterface::class);
+        $this->withHeader('Authorization', 'Bearer '.$tokenService->generateAccessToken($admin));
+        $this->postJson('/api/v1/auth/register/request-code', ['email' => 'new@example.com'])->assertOk();
+        $code = $this->sentCodeTo('new@example.com');
+        $payload = ['name' => 'New staff', 'email' => 'new@example.com', 'password' => 'SecurePass123!', 'verification_code' => $code];
+        $this->withHeader('Authorization', 'Bearer '.$tokenService->generateAccessToken($otherAdmin));
+        $this->postJson('/api/v1/auth/register', $payload)->assertUnprocessable()->assertJsonValidationErrors('verification_code');
+        $this->withHeader('Authorization', 'Bearer '.$tokenService->generateAccessToken($admin));
+        $this->postJson('/api/v1/auth/register', array_replace($payload, ['email' => 'other@example.com']))->assertUnprocessable();
+        $this->postJson('/api/v1/auth/register/request-code', ['email' => $payload['email']])->assertUnprocessable();
+        $wrong = $code === '000000' ? '111111' : '000000';
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $this->postJson('/api/v1/auth/register', array_replace($payload, ['verification_code' => $wrong]))->assertUnprocessable();
+        }
+        $this->postJson('/api/v1/auth/register', $payload)->assertUnprocessable();
+        $this->assertDatabaseMissing('users', ['email' => $payload['email']]);
+    }
+
+    public function test_code_expires_after_ten_minutes_and_can_be_resent_after_cooldown(): void
+    {
+        Mail::fake();
         $role = Designation::create(['name' => 'Admin', 'slug' => 'admin']);
         $admin = User::factory()->create(['designation_id' => $role->id]);
         $this->withHeader('Authorization', 'Bearer '.app(TokenServiceInterface::class)->generateAccessToken($admin));
-        $payload = ['name' => 'New cashier', 'email' => 'retry@example.com', 'password' => 'SecurePass123!', 'designation_id' => 99999];
-        $this->postJson('/api/v1/auth/register', $payload)->assertUnprocessable()->assertJsonValidationErrors('designation_id');
-        $this->assertDatabaseMissing('users', ['email' => 'retry@example.com']);
-        $payload['designation_id'] = $role->id;
-        $this->postJson('/api/v1/auth/register', $payload)->assertCreated();
+        $payload = ['name' => 'New staff', 'email' => 'later@example.com', 'password' => 'SecurePass123!'];
+        $this->postJson('/api/v1/auth/register/request-code', ['email' => $payload['email']])->assertOk();
+        $oldCode = $this->sentCodeTo($payload['email']);
+        $this->travel(11)->minutes();
+        $this->postJson('/api/v1/auth/register', $payload + ['verification_code' => $oldCode])->assertUnprocessable();
+        $this->postJson('/api/v1/auth/register/request-code', ['email' => $payload['email']])->assertOk();
+        Mail::assertSent(StaffVerificationCodeMail::class, 2);
     }
 
     public function test_all_permissions_can_be_revoked_from_a_custom_role(): void
@@ -106,6 +128,22 @@ class AuthApiTest extends TestCase
         User::factory()->create(['designation_id' => $adminRole->id]);
         $this->putJson($url, ['designation_id' => $cashierRole->id])->assertOk();
         $this->assertSame($cashierRole->id, $admin->fresh()->designation_id);
+    }
+
+    private function sentCodeTo(string $email): string
+    {
+        $code = null;
+        Mail::assertSent(StaffVerificationCodeMail::class, function (StaffVerificationCodeMail $mail) use ($email, &$code): bool {
+            if (! $mail->hasTo($email)) {
+                return false;
+            }
+            $code = $mail->code;
+
+            return true;
+        });
+        $this->assertNotNull($code);
+
+        return $code;
     }
 
     public function test_refresh_rotates_once_and_invalid_tokens_return_unauthorized(): void

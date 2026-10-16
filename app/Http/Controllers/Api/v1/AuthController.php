@@ -12,6 +12,7 @@ use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Requests\Auth\RefreshTokenRequest;
 use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Resources\UserResource;
+use App\Services\Auth\StaffEmailVerificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -19,26 +20,33 @@ use Symfony\Component\HttpFoundation\Response;
 class AuthController extends BaseApiController
 {
     public function __construct(
-        private readonly AuthServiceInterface $authService
+        private readonly AuthServiceInterface $authService,
+        private readonly StaffEmailVerificationService $staffEmailVerification
     ) {}
 
-    /**
-     * Register a new user and generate access/refresh tokens.
-     */
+    /** Send a short-lived code to the prospective employee. */
+    public function requestRegistrationCode(Request $request): JsonResponse
+    {
+        $validated = $request->validate(['email' => ['required', 'string', 'email', 'max:255']]);
+        $this->staffEmailVerification->send($validated['email'], $this->getAuthenticatedUser($request)->id);
+
+        return $this->successResponse(message: 'A verification code was sent to the staff email address.');
+    }
+
+    /** Create a staff account only after its mailbox was confirmed. */
     public function register(RegisterRequest $request): JsonResponse
     {
         $dto = RegisterDTO::fromRequest($request);
-        $result = $this->authService->register($dto);
+        $user = $this->staffEmailVerification->complete(
+            $dto->email,
+            $this->getAuthenticatedUser($request)->id,
+            (string) $request->validated('verification_code'),
+            fn () => $this->authService->register($dto)
+        );
 
         return $this->successResponse(
-            data: [
-                'user' => new UserResource($result['user']),
-                'access_token' => $result['access_token'],
-                'refresh_token' => $result['refresh_token'],
-                'token_type' => $result['token_type'],
-                'expires_in' => $result['expires_in'],
-            ],
-            message: 'User registered and authenticated successfully.',
+            data: ['user' => new UserResource($user)],
+            message: 'Staff account created with a verified email address.',
             statusCode: Response::HTTP_CREATED
         );
     }

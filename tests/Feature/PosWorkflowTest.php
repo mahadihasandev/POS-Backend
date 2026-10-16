@@ -191,6 +191,7 @@ class PosWorkflowTest extends TestCase
         $this->postJson('/api/v1/pos/sales', $this->sale())->assertForbidden();
         $this->getJson('/api/v1/rbac/designations')->assertForbidden();
         $this->postJson('/api/v1/auth/register', ['name' => 'New staff', 'email' => 'staff@example.com', 'password' => 'LongPassword123!'])->assertForbidden();
+        $this->postJson('/api/v1/auth/register/request-code', ['email' => 'staff@example.com'])->assertForbidden();
     }
 
     public function test_catalog_edit_and_stock_counts_are_audited_and_detect_stale_counts(): void

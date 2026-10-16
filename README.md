@@ -1,4 +1,4 @@
-# Smart Account POS backend
+# Prime Account POS backend
 
 Laravel 13 API for the matching POS frontend. The committed lockfile uses Symfony 8, so deploy with PHP 8.4 or later, Composer 2, and SQLite or a production database supported by Laravel.
 
@@ -48,3 +48,28 @@ Inventory and payment accounts are global across outlets in the existing schema.
 ### Staff administration follow-up
 
 `POST /api/v1/auth/register` accepts an optional existing `designation_id` and saves it with the staff account in one transaction. Deploy this API version before the corporate-workspace frontend, which sends the selected role during registration. Role permission updates accept an empty array to revoke all permissions. Role reassignment rejects removal of the last administrator; assign another administrator first. This follow-up requires no additional migrations beyond the initial POS upgrade. Regression coverage: 44 tests / 235 assertions.
+
+### Employee email verification
+
+Staff registration now requires confirmation of the employee's mailbox. An administrator with `users.manage` sends `POST /api/v1/auth/register/request-code` with `{ "email": "employee@company.com" }`. The employee receives a six-digit code and gives it to the administrator. The registration request must include that code as `verification_code` along with the existing staff fields.
+
+No user is created until the code is accepted. Successful registration sets `email_verified_at` and returns the created user; it no longer returns employee access/refresh tokens to the administrator. Codes expire after ten minutes, allow five incorrect attempts, and can be resent after one minute. They are tied to the requesting administrator and normalized email, stored as keyed hashes, and consumed after successful creation. The code endpoint also has a request limit. Existing users are not automatically marked verified.
+
+Configure actual delivery before deploying the matching frontend. `MAIL_MAILER=log` is for local testing only and is rejected for production registration. Set these variables in the backend host (for example, Vercel project Environment Variables), using the configured Gmail sender `arnob4all@gmail.com`:
+
+```dotenv
+MAIL_MAILER=smtp
+MAIL_HOST=smtp.gmail.com
+MAIL_PORT=587
+MAIL_SCHEME=smtp
+MAIL_USERNAME=arnob4all@gmail.com
+MAIL_PASSWORD="<Google App Password stored only in deployment secrets>"
+MAIL_FROM_ADDRESS=arnob4all@gmail.com
+MAIL_FROM_NAME="Prime Account POS"
+```
+
+For this Gmail account, enable 2-Step Verification and create a dedicated App Password in [Google Account settings](https://myaccount.google.com/apppasswords). Store it as `MAIL_PASSWORD` in the backend host's secret environment variables, never in chat or source control. This SMTP integration uses an App Password, not the ordinary Gmail sign-in password; see [Google's App Password instructions](https://support.google.com/accounts/answer/185833). Set all of the variables above on the backend host, remove any stale `MAIL_URL` override, and redeploy or refresh the configuration cache. Gmail uses STARTTLS on port 587 with `MAIL_SCHEME=smtp`, as documented in [Google's SMTP settings](https://support.google.com/mail/answer/7104828). The checked-in example keeps `MAIL_MAILER=log` until a real secret is supplied. No real delivery has been verified yet.
+
+Use the provider's required port and scheme (for example `smtps` with port 465 if required). The sender/domain must be authorized by the mail provider. Keep credentials in deployment secrets, never Git. Use a shared persistent cache such as Redis or a database cache accessible to every API instance; serverless `/tmp` and array caches cannot carry verification across instances. Preserve `APP_KEY`. Refresh cached configuration after changing environment values.
+
+Deploy the backend and frontend together after mail configuration. No additional database migration is required for this feature. Local tests use Laravel mail fakes/log output; successful SMTP acceptance and actual inbox delivery must be checked with a real staff mailbox after deployment.
